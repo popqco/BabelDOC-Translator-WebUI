@@ -16,6 +16,9 @@ if not errorlevel 1 set "PY_CMD=py -3.11" & goto :have_py
 py -3.12 -c "import sys" >nul 2>nul
 if not errorlevel 1 set "PY_CMD=py -3.12" & goto :have_py
 
+py -3.13 -c "import sys" >nul 2>nul
+if not errorlevel 1 set "PY_CMD=py -3.13" & goto :have_py
+
 py -3.10 -c "import sys" >nul 2>nul
 if not errorlevel 1 set "PY_CMD=py -3.10" & goto :have_py
 
@@ -33,6 +36,16 @@ goto :have_py
 :have_py
 echo 使用解释器: %PY_CMD%
 
+rem 默认使用清华镜像加速；网络受限时可通过环境变量覆盖：
+rem   set PIP_INDEX=https://pypi.org/simple
+if "%PIP_INDEX%"=="" set "PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple"
+set "PIP_FALLBACK=https://pypi.org/simple"
+
+rem 依赖版本以 requirements.lock 为准（完整锁定，可复现）；
+rem lock 缺失时回退到 requirements.txt 的宽松版本约束
+set "REQ_FILE=requirements.txt"
+if exist requirements.lock set "REQ_FILE=requirements.lock"
+
 if not exist venv (
     echo [1/3] 正在创建虚拟环境 venv ...
     %PY_CMD% -m venv venv
@@ -46,14 +59,18 @@ if not exist venv (
 )
 
 echo [2/3] 正在升级 pip ...
-venv\Scripts\python.exe -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple
+venv\Scripts\python.exe -m pip install --upgrade pip -i %PIP_INDEX%
 
 echo [3/3] 正在安装依赖（BabelDOC 0.6.4 / Gradio / pywebview ...）...
-venv\Scripts\python.exe -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+venv\Scripts\python.exe -m pip install -r %REQ_FILE% -i %PIP_INDEX%
 if errorlevel 1 (
-    echo [错误] 依赖安装失败，请检查网络后重试。
-    pause
-    exit /b 1
+    echo [WARN] 镜像源安装失败，尝试官方 PyPI 源...
+    venv\Scripts\python.exe -m pip install -r %REQ_FILE% -i %PIP_FALLBACK%
+    if errorlevel 1 (
+        echo [错误] 依赖安装失败，请检查网络后重试。
+        pause
+        exit /b 1
+    )
 )
 
 echo.

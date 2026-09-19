@@ -1,1 +1,6 @@
+# VBScript 含中文注释，保持 UTF-16 编码并以二进制方式入库（避免行尾/diff 干扰）
+*.vbs binary
+
+# Windows 批处理脚本必须保持 CRLF
+*.bat text eol=crlf
 assets/** filter=lfs diff=lfs merge=lfs -text

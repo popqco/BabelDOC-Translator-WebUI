@@ -9,10 +9,8 @@ venv/
 env/
 
 # --- Local secrets & runtime state ---
-# 注意：data/config.json 内含 API Key，绝不能提交
-data/config.json
-data/prompts.json
-data/tasks/
+# 注意：data/config.json 内含 API Key，绝不能提交；data/ 整目录均为运行时数据
+data/
 *.tmp
 
 # --- Generated output & caches ---
@@ -21,7 +19,9 @@ tests/test_scratch*/
 tests/test_e2e_out/
 .cache/
 temp/
-*.pyc
+
+# --- Build artifacts ---
+dist/
 
 # --- Debug artifacts ---
 video_frames/
