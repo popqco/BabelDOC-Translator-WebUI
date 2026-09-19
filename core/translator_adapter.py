@@ -165,6 +165,11 @@ class TranslatorAdapter:
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
 
+        # 主进程为 pythonw（无控制台）时，控制台型子进程会被 Windows 分配
+        # 一个可见的黑框窗口；用户顺手关掉它会直接杀死内核（0xC000013A）。
+        # CREATE_NO_WINDOW 让子进程持有隐藏控制台，stdout 管道照常工作。
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
         # 启动翻译进程
         proc = subprocess.Popen(
             cmd,
@@ -174,7 +179,8 @@ class TranslatorAdapter:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            env=env
+            env=env,
+            creationflags=creationflags
         )
 
         if proc_holder is not None:

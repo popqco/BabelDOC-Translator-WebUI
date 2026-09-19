@@ -429,7 +429,10 @@ class TaskManager:
             tasks = []
             for idx, item in enumerate(queue_snapshot, start=1):
                 orig_p = Path(item["path"])
-                cached_p = cache_dir / f"{orig_p.stem}_{item['hash'][:8]}{orig_p.suffix}"
+                # 缓存副本以原始文件名命名：item["path"] 指向暂存副本，
+                # 其 stem 可能已带哈希后缀，再用它命名会出现双哈希
+                orig_name = Path(item["name"])
+                cached_p = cache_dir / f"{orig_name.stem}_{item['hash'][:8]}{orig_name.suffix}"
                 try:
                     shutil.copyfile(orig_p, cached_p)
                 except Exception:

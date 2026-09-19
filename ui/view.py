@@ -31,6 +31,8 @@ CLAUDE_CUSTOM_CSS = """
     --claude-accent: #DA7756;
     --claude-accent-hover: #C86747;
     --claude-accent-soft: #FBF0EB;
+    --claude-success: #2E7D32;
+    --claude-danger: #C62828;
 }
 
 /* 夜间模式颜色变量 (Claude Dark Charcoal & Terracotta 配色) */
@@ -43,6 +45,8 @@ CLAUDE_CUSTOM_CSS = """
     --claude-accent: #E07A5F !important;
     --claude-accent-hover: #EC896E !important;
     --claude-accent-soft: #382C27 !important;
+    --claude-success: #7BC67E !important;
+    --claude-danger: #F2A2A2 !important;
 }
 
 body, .gradio-container {
@@ -725,14 +729,25 @@ def create_ui():
         # 上一次交付给 gr.File 的 ZIP 路径：仅在变化时才更新组件，
         # 避免每秒对大压缩包做一次重新拷贝/哈希
         last_zip_state = gr.State(None)
+        # 上一次各组件的渲染签名：内容未变化时返回 gr.update() 跳过整卡重渲染，
+        # 否则状态卡会每秒闪烁一次
+        last_render_state = gr.State(None)
 
-        def on_timer_tick(current_choice, prev_zip):
+        def on_timer_tick(current_choice, prev_zip, prev_render):
+            prev_render = prev_render or {}
             # 锁内只取轻量快照，文件系统探测与拼接放在锁外，
             # 避免每秒轮询与翻译工作线程互相阻塞
             with tm.lock:
                 logs_tail = list(tm.logs)[-150:]
                 if not tm.active_batch:
                     hist_ids = [r["batch_id"] for r in tm.history_records]
+                    if prev_render.get("phase") == "empty":
+                        return (
+                            "".join(logs_tail) if logs_tail else "等待任务启动...\n",
+                            gr.update(), gr.update(), gr.update(), gr.update(),
+                            gr.update(), gr.update(), None, prev_render
+                        )
+                    empty_render = {"phase": "empty"}
                     return (
                         "".join(logs_tail) if logs_tail else "等待任务启动...\n",
                         "当前尚无正在运行或完成的批次。",
@@ -741,7 +756,8 @@ def create_ui():
                         gr.update(visible=False),
                         gr.update(value=None) if prev_zip else gr.update(),
                         gr.update(choices=hist_ids),
-                        None
+                        None,
+                        empty_render
                     )
                 b = tm.active_batch
                 snapshot = {
@@ -762,11 +778,14 @@ def create_ui():
             canc_cnt = statuses.count("cancelled")
             proc_cnt = statuses.count("processing")
 
-            status_color = "#DA7756" if snapshot["status"] == "running" else ("#2E7D32" if snapshot["status"] == "completed" else "#C62828")
+            # 全部使用主题 CSS 变量：暗色模式下自动适配配色并保证可读性
+            status_color = ("var(--claude-accent)" if snapshot["status"] == "running"
+                            else "var(--claude-success)" if snapshot["status"] == "completed"
+                            else "var(--claude-danger)")
             summary_html = f"""
-            <div style='background: #FFF; border: 1px solid #E5E4DE; border-radius: 8px; padding: 10px; margin-bottom: 8px;'>
+            <div style='background: var(--claude-surface); border: 1px solid var(--claude-border); color: var(--claude-text); border-radius: 8px; padding: 10px; margin-bottom: 8px;'>
                 <b>批次编号:</b> {snapshot['batch_id']} | <span style='color: {status_color}; font-weight: bold;'>{snapshot['status'].upper()}</span><br/>
-                <b>进度概览:</b> 共 {total_cnt} 篇 (完成 <span style='color:#2E7D32;'>{succ_cnt}</span> / 处理中 {proc_cnt} / 失败 <span style='color:#C62828;'>{fail_cnt}</span> / 取消 {canc_cnt})<br/>
+                <b>进度概览:</b> 共 {total_cnt} 篇 (完成 <span style='color:var(--claude-success);'>{succ_cnt}</span> / 处理中 {proc_cnt} / 失败 <span style='color:var(--claude-danger);'>{fail_cnt}</span> / 取消 {canc_cnt})<br/>
                 <b>输出路径:</b> <small>{snapshot['output_dir']}</small>
             </div>
             """
@@ -794,20 +813,40 @@ def create_ui():
                 zip_out = gr.update(value=None) if prev_zip else gr.update()
                 new_zip_state = None
 
+            # 各组件渲染签名：与上一秒一致则返回 gr.update()（跳过 DOM 更新，消除闪烁）
+            render = {
+                "phase": "batch",
+                "summary": summary_html,
+                "choices": (tuple(choice_values), new_choice, has_results),
+                "retry": has_failures,
+                "row": (has_results or zip_ok),
+                "hist": tuple(hist_ids),
+            }
+            out_summary = summary_html if render["summary"] != prev_render.get("summary") else gr.update()
+            out_choices = (gr.update(choices=choices, value=new_choice, visible=has_results)
+                           if render["choices"] != prev_render.get("choices") else gr.update())
+            out_retry = (gr.update(visible=has_failures)
+                         if render["retry"] != prev_render.get("retry") else gr.update())
+            out_row = (gr.update(visible=render["row"])
+                       if render["row"] != prev_render.get("row") else gr.update())
+            out_hist = (gr.update(choices=hist_ids)
+                        if render["hist"] != prev_render.get("hist") else gr.update())
+
             return (
                 log_txt,
-                summary_html,
-                gr.update(choices=choices, value=new_choice, visible=has_results),
-                gr.update(visible=has_failures),
-                gr.update(visible=has_results or zip_ok),
+                out_summary,
+                out_choices,
+                out_retry,
+                out_row,
                 zip_out,
-                gr.update(choices=hist_ids),
-                new_zip_state
+                out_hist,
+                new_zip_state,
+                render
             )
 
         timer.tick(
             fn=on_timer_tick,
-            inputs=[pdf_result_selector, last_zip_state],
+            inputs=[pdf_result_selector, last_zip_state, last_render_state],
             outputs=[
                 log_output,
                 batch_summary_md,
@@ -816,7 +855,8 @@ def create_ui():
                 download_row,
                 batch_zip_file,
                 history_dropdown,
-                last_zip_state
+                last_zip_state,
+                last_render_state
             ]
         )
 
