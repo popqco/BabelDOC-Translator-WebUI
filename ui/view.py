@@ -215,6 +215,13 @@ h1, h2, h3, h4, h5, h6, .markdown h1, .markdown h2, .markdown h3 {
     font-weight: bold;
     display: inline-block;
 }
+
+/* 根除轮询闪烁：Gradio 在事件执行期间会给输出组件加 .pending 类
+   （前端 CSS 规则 .pending.svelte-* { opacity: .2 }），1 秒轮询令状态卡
+   每秒在"变暗→恢复"间交替。此覆盖保持组件全程完全可见。 */
+.pending, .pending * {
+    opacity: 1 !important;
+}
 """
 
 def open_folder(folder_path: str):

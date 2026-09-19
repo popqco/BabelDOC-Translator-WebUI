@@ -12,6 +12,7 @@ os.environ["NO_PROXY"] = os.environ["no_proxy"] = _no_proxy
 import threading
 import webview
 from ui.view import create_ui
+from core.config import load_app_config
 from core.task_manager import TaskManager
 
 
@@ -27,13 +28,18 @@ def alert_error(message: str):
 
 def start_server(demo, result):
     try:
+        # 成果目录通常在应用目录之外（如 D:\LefeetHardware\...），
+        # 不加入 allowed_paths 时 Gradio 拒绝向外提供预览/下载文件，
+        # PDF 预览会直接抛 InvalidPathError
+        allowed = [p for p in [load_app_config().get("output_dir")] if p]
         demo.launch(
             server_name="127.0.0.1",
             # 传入 None 让 Gradio 自选空闲端口，消除"先探测后绑定"的竞态窗口；
             # 需要固定端口时通过 BABELDOC_PORT 环境变量指定（便于排障/防火墙放行）
             server_port=result["port"],
             prevent_thread_lock=True,
-            quiet=True
+            quiet=True,
+            allowed_paths=allowed
         )
         result["url"] = demo.local_url or f"http://127.0.0.1:{demo.server_port}"
     except Exception as e:

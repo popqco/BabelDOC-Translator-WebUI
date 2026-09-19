@@ -178,6 +178,10 @@ class TranslatorAdapter:
             cmd.append("--translate-table-text")
         if system_prompt and system_prompt.strip():
             cmd.extend(["--custom-system-prompt", system_prompt.strip()])
+        # 关闭自动术语提取：该前置步骤对部分文档会被中转站拒绝
+        # （new_api_error），一旦失败内核放弃整篇翻译、静默输出原文回退；
+        # 它只是可选增强，禁用后主翻译流程稳定得多。
+        cmd.append("--no-auto-extract-glossary")
 
         base_pct = (file_idx - 1) / total_files
         file_span = 1.0 / total_files
