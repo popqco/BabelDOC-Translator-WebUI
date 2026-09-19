@@ -702,17 +702,25 @@ def create_ui():
             outputs=[output_preview]
         )
 
-        # 重试失败文件
-        def on_retry_failed_click(b_url, key, mdl):
+        # 重试失败文件：目标按优先级回退——历史记录中选中的批次 →
+        # 当前活动批次 → 最近一个含失败/取消任务的批次。
+        # （此前只认活动批次：应用重启后历史里的失败批次永远无法重试）
+        def on_retry_failed_click(b_url, key, mdl, selected_b_id):
             with tm.lock:
                 batch_id = tm.active_batch.batch_id if tm.active_batch else None
-            if not batch_id:
-                gr.Warning("当前无活动批次！")
+            target = selected_b_id or batch_id
+            if not target:
+                for r in tm.history_records:
+                    if any(t.get("status") in ("failed", "cancelled") for t in r.get("tasks", [])):
+                        target = r["batch_id"]
+                        break
+            if not target:
+                gr.Warning("没有找到可重试的批次。")
                 return
             conn = {"base_url": b_url.strip(), "api_key": key.strip(), "model": mdl.strip()}
             # 顺手持久化当前连接配置（与"自动保存"承诺一致）
             save_app_config({"base_url": conn["base_url"], "api_key": conn["api_key"], "model": conn["model"]})
-            ok, msg = tm.retry_failed_tasks(batch_id, conn)
+            ok, msg = tm.retry_failed_tasks(target, conn)
             if ok:
                 gr.Info(f"重试已启动！{msg}")
             else:
@@ -720,7 +728,7 @@ def create_ui():
 
         retry_failed_btn.click(
             fn=on_retry_failed_click,
-            inputs=[base_url, api_key, model],
+            inputs=[base_url, api_key, model, selected_batch_id],
             outputs=None
         )
 
@@ -776,6 +784,11 @@ def create_ui():
             # 避免每秒轮询与翻译工作线程互相阻塞
             with tm.lock:
                 logs_tail = list(tm.logs)[-150:]
+                # 历史中是否存在可重试任务（重启后无活动批次也能重试失败批次）
+                has_retryable_history = any(
+                    t.get("status") in ("failed", "cancelled")
+                    for r in tm.history_records for t in r.get("tasks", [])
+                )
                 if not tm.active_batch:
                     hist_ids = [r["batch_id"] for r in tm.history_records]
                     log_txt = "".join(logs_tail) if logs_tail else "等待任务启动...\n"
@@ -789,7 +802,8 @@ def create_ui():
                         log_txt,
                         "当前尚无正在运行或完成的批次。" if first_empty else gr.update(),
                         gr.update(choices=[], visible=False) if first_empty else gr.update(),
-                        gr.update(visible=False) if first_empty else gr.update(),
+                        (gr.update(visible=has_retryable_history)
+                         if first_empty or has_retryable_history != prev_render.get("retry") else gr.update()),
                         gr.update(visible=False) if first_empty else gr.update(),
                         gr.update(value=None) if prev_zip else gr.update(),
                         gr.update(choices=hist_ids) if first_empty else gr.update(),
@@ -837,7 +851,8 @@ def create_ui():
 
             choice_values = [v for _, v in choices]
             has_results = len(choices) > 0
-            has_failures = (fail_cnt + canc_cnt) > 0 and snapshot["status"] != "running"
+            batch_running = snapshot["status"] == "running"
+            has_failures = (not batch_running) and ((fail_cnt + canc_cnt) > 0 or has_retryable_history)
 
             zp = snapshot["zip_path"]
             zip_ok = bool(zp and Path(zp).exists())
