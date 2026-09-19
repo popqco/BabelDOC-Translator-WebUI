@@ -1,16 +1,14 @@
 @echo off
 chcp 65001 >nul
-title BabelDOC ¿Æ¼¼ÎÄµµ/Ğ¾Æ¬¹æ¸ñÊé·­ÒëÆ÷ WebUI
-echo ============================================================
-echo   ÕıÔÚÆô¶¯ BabelDOC ¸ßÖÊÁ¿Ë«Óï·­Òë·şÎñ...
-echo   Æô¶¯³É¹¦ºóÇëÔÚä¯ÀÀÆ÷·ÃÎÊ: http://localhost:7860
-echo ============================================================
+title BabelDOC ç¿»è¯‘å™¨ - æ§åˆ¶å°è°ƒè¯•æ¨¡å¼
+cd /d "%~dp0"
 
-if not exist venv (
-    echo [ÌáÊ¾] ¼ì²âµ½ÉĞÎ´³õÊ¼»¯»·¾³£¬ÕıÔÚ×Ô¶¯Ö´ĞĞ°²×°...
-    call install.bat
+if not exist venv\Scripts\python.exe (
+    echo [æç¤º] æœªæ‰¾åˆ° venvï¼Œè¯·å…ˆè¿è¡Œ install.batã€‚
+    pause
+    exit /b 1
 )
 
-call venv\Scripts\activate.bat
-python app.py
+echo æ­£åœ¨ä»¥è°ƒè¯•æ¨¡å¼å¯åŠ¨ï¼ˆä¼šæ˜¾ç¤ºæ—¥å¿—çª—å£ï¼Œæ—¥å¸¸ä½¿ç”¨è¯·åŒå‡» start_silent.vbsï¼‰...
+venv\Scripts\python.exe app.py
 pause

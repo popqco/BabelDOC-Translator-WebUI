@@ -1,0 +1,765 @@
+﻿import os
+import sys
+import json
+import subprocess
+from pathlib import Path
+import gradio as gr
+from gradio_pdf import PDF
+
+from core.config import load_app_config, save_app_config, get_default_output_dir
+from core.prompt_manager import load_prompts, save_prompts
+from core.task_manager import TaskManager
+
+LANG_MAP = {
+    "英语 (English)": "en",
+    "简体中文 (Simplified Chinese)": "zh",
+    "繁体中文 (Traditional Chinese)": "zh-tw",
+    "日语 (Japanese)": "ja",
+    "韩语 (Korean)": "ko",
+    "德语 (German)": "de",
+    "法语 (French)": "fr",
+    "俄语 (Russian)": "ru",
+    "西班牙语 (Spanish)": "es"
+}
+LANG_REV_MAP = {v: k for k, v in LANG_MAP.items()}
+
+CLAUDE_CUSTOM_CSS = """
+:root {
+    --claude-bg: #FAF9F5;
+    --claude-surface: #FFFFFF;
+    --claude-border: #E5E4DE;
+    --claude-text: #2D2B28;
+    --claude-text-muted: #736E65;
+    --claude-accent: #DA7756;
+    --claude-accent-hover: #C86747;
+    --claude-accent-soft: #FBF0EB;
+}
+
+/* 夜间模式颜色变量 (Claude Dark Charcoal & Terracotta 配色) */
+.dark, :root .dark, [data-theme="dark"] {
+    --claude-bg: #1E1E1E !important;
+    --claude-surface: #2A2A28 !important;
+    --claude-border: #3E3D39 !important;
+    --claude-text: #ECEBE8 !important;
+    --claude-text-muted: #A8A59E !important;
+    --claude-accent: #E07A5F !important;
+    --claude-accent-hover: #EC896E !important;
+    --claude-accent-soft: #382C27 !important;
+}
+
+body, .gradio-container {
+    background-color: var(--claude-bg) !important;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif !important;
+    color: var(--claude-text) !important;
+}
+
+.dark body, .dark .gradio-container, [data-theme="dark"] .gradio-container {
+    background-color: var(--claude-bg) !important;
+    color: var(--claude-text) !important;
+}
+
+.gr-panel, .gr-box, .gr-compact {
+    background-color: var(--claude-surface) !important;
+    border: 1px solid var(--claude-border) !important;
+    border-radius: 12px !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
+}
+
+.gr-accordion {
+    background-color: var(--claude-surface) !important;
+    border: 1px solid var(--claude-border) !important;
+    border-radius: 10px !important;
+    margin-bottom: 12px !important;
+}
+
+.gr-button-primary {
+    background: linear-gradient(135deg, #DA7756 0%, #C86747 100%) !important;
+    color: #FFFFFF !important;
+    border: none !important;
+    border-radius: 8px !important;
+    font-weight: 500 !important;
+    box-shadow: 0 2px 4px rgba(218, 119, 86, 0.25) !important;
+    transition: all 0.2s ease !important;
+}
+
+.gr-button-primary:hover {
+    background: linear-gradient(135deg, #C86747 0%, #B85B3D 100%) !important;
+    box-shadow: 0 4px 8px rgba(218, 119, 86, 0.35) !important;
+    transform: translateY(-1px);
+}
+
+.gr-button-secondary {
+    background-color: #F4F3ED !important;
+    color: var(--claude-text) !important;
+    border: 1px solid var(--claude-border) !important;
+    border-radius: 8px !important;
+}
+
+.gr-button-secondary:hover {
+    background-color: #EAE8DF !important;
+}
+
+/* 夜间模式按钮适配 */
+.dark .gr-button-secondary, [data-theme="dark"] .gr-button-secondary {
+    background-color: #33322E !important;
+    color: var(--claude-text) !important;
+    border: 1px solid var(--claude-border) !important;
+}
+
+.dark .gr-button-secondary:hover, [data-theme="dark"] .gr-button-secondary:hover {
+    background-color: #3F3E39 !important;
+}
+
+/* 统一输入框与文本域的夜间及日间模式样式 */
+input, textarea, select {
+    border-radius: 8px !important;
+    border: 1px solid var(--claude-border) !important;
+    background-color: var(--claude-surface) !important;
+    color: var(--claude-text) !important;
+}
+
+/* 彻底解决 Textbox 在夜间模式下外部容器或输入框变白的突兀问题 */
+.dark input, .dark textarea, .dark select,
+[data-theme="dark"] input, [data-theme="dark"] textarea, [data-theme="dark"] select,
+.dark .block, [data-theme="dark"] .block,
+.dark [data-testid="textbox"], [data-theme="dark"] [data-testid="textbox"] {
+    background-color: #242422 !important;
+    color: #ECEBE8 !important;
+    border-color: #3E3D39 !important;
+}
+
+.dark label.container, [data-theme="dark"] label.container {
+    background-color: #242422 !important;
+}
+
+/* 解决 Gradio Textbox 组件中内部 input 被默认变量覆盖而发白的问题 */
+.dark input[data-testid="textbox"],
+[data-theme="dark"] input[data-testid="textbox"],
+.dark textarea[data-testid="textbox"],
+[data-theme="dark"] textarea[data-testid="textbox"] {
+    background-color: #1E1E1C !important;
+    color: #ECEBE8 !important;
+    border: 1px solid #3E3D39 !important;
+}
+
+input:focus, textarea:focus,
+.dark input:focus, .dark textarea:focus,
+[data-theme="dark"] input:focus, [data-theme="dark"] textarea:focus {
+    border-color: var(--claude-accent) !important;
+    box-shadow: 0 0 0 2px var(--claude-accent-soft) !important;
+}
+
+/* 标题与 Markdown 文本在明暗模式下的对比度增强 */
+h1, h2, h3, h4, h5, h6, .markdown h1, .markdown h2, .markdown h3 {
+    color: var(--claude-text) !important;
+}
+
+.dark h1, .dark h2, .dark h3, .dark h4, .dark p, .dark span,
+[data-theme="dark"] h1, [data-theme="dark"] h2, [data-theme="dark"] h3, [data-theme="dark"] p {
+    color: var(--claude-text) !important;
+}
+
+/* 日志框样式 */
+.log-box textarea {
+    font-family: Consolas, "Courier New", monospace !important;
+    font-size: 12px !important;
+    line-height: 1.4 !important;
+    background-color: #F8F7F2 !important;
+    color: #3C3836 !important;
+}
+
+.dark .log-box textarea, [data-theme="dark"] .log-box textarea {
+    background-color: #191918 !important;
+    color: #D4D2CD !important;
+    border: 1px solid var(--claude-border) !important;
+}
+
+/* 拖拽上传框适配 */
+.file-upload-box {
+    min-height: 145px !important;
+}
+.file-upload-box .upload-container, 
+.file-upload-box [data-testid="file-upload"],
+.file-upload-box .drop-zone {
+    min-height: 135px !important;
+    padding: 8px !important;
+}
+.file-upload-box .wrap {
+    min-height: 95px !important;
+    padding-top: 2px !important;
+    padding-bottom: 6px !important;
+    justify-content: center !important;
+}
+.file-upload-box .icon-wrap {
+    margin-bottom: 4px !important;
+    width: 24px !important;
+}
+.file-upload-box .file-preview {
+    pointer-events: auto !important;
+}
+
+.dark .file-upload-box, [data-theme="dark"] .file-upload-box {
+    background-color: var(--claude-surface) !important;
+    border: 1px dashed var(--claude-border) !important;
+}
+.dark .file-upload-box .wrap, [data-theme="dark"] .file-upload-box .wrap {
+    color: var(--claude-text) !important;
+}
+
+.status-pill {
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: bold;
+    display: inline-block;
+}
+"""
+
+def open_folder(folder_path: str):
+    if folder_path and os.path.exists(folder_path):
+        subprocess.Popen(f'explorer.exe "{os.path.normpath(folder_path)}"')
+    else:
+        gr.Warning("输出文件夹尚未生成或不存在。")
+
+def pick_folder_dialog(current_val: str):
+    """弹出原生 Windows 文件夹选择框"""
+    try:
+        import webview
+        if webview.windows:
+            win = webview.windows[0]
+            chosen = win.create_file_dialog(dialog_type=webview.FOLDER_DIALOG, directory=current_val)
+            if chosen and len(chosen) > 0:
+                selected_dir = chosen[0]
+                save_app_config({"output_dir": selected_dir})
+                return selected_dir
+    except Exception as e:
+        print(f"Native folder dialog fallback: {e}")
+    return current_val
+
+def create_ui():
+    cfg = load_app_config()
+    prompts = load_prompts()
+    tm = TaskManager()
+
+    def format_pending_display():
+        with tm.lock:
+            if not tm.pending_queue:
+                return "（当前队列为空，请拖入或点击添加 PDF）"
+            lines = [f"**待翻译清单 ({len(tm.pending_queue)} 个文件)**："]
+            for i, item in enumerate(tm.pending_queue, start=1):
+                lines.append(f"{i}. 📄 **{item['name']}**")
+            return "\n".join(lines)
+
+    with gr.Blocks(title="BabelDOC 科技文档翻译器", css=CLAUDE_CUSTOM_CSS) as demo:
+        prompt_state = gr.State(prompts)
+        selected_batch_id = gr.State("")
+
+        with gr.Row():
+            gr.Markdown(
+                """
+                # 📜 BabelDOC 科技文档/芯片规格书批量翻译器
+                **BabelDOC 0.6.4** 官方内核 · 可选生成仅译文/双语对照 · 动态任务队列追加与取消 · 原生桌面交付
+                """
+            )
+
+        with gr.Row():
+            # ================= 左侧控制面板 =================
+            with gr.Column(scale=5):
+                # 上传区域：支持拖入与选择，拖入后立即按 hash 排重入队
+                file_input = gr.File(
+                    label="📁 拖入或选择 PDF 文档 (支持多次追加拖拽)",
+                    file_types=[".pdf"],
+                    file_count="multiple",
+                    height=140,
+                    elem_classes=["file-upload-box"]
+                )
+
+                with gr.Row():
+                    remove_last_btn = gr.Button("➖ 移除最后一项", variant="secondary", size="sm")
+                    clear_btn = gr.Button("🗑️ 清空待翻译列表", variant="secondary", size="sm")
+
+                pending_display = gr.Markdown(value=format_pending_display())
+
+                # 输出格式与交付控制 (立即持久化记忆)
+                with gr.Accordion("⚙️ 输出文件与交付方式设置 (自动记忆)", open=True):
+                    with gr.Row():
+                        out_mono_cb = gr.Checkbox(
+                            label="仅译文版 PDF (.mono.pdf)",
+                            value=cfg.get("output_mono", False),
+                            info="格式保留，纯译文排版"
+                        )
+                        out_dual_cb = gr.Checkbox(
+                            label="双语对照版 PDF (.dual.pdf)",
+                            value=cfg.get("output_dual", True),
+                            info="原文与译文逐段并排对照"
+                        )
+                    with gr.Row():
+                        gen_zip_cb = gr.Checkbox(
+                            label="📦 自动打包为 ZIP 交付包",
+                            value=cfg.get("generate_zip", False),
+                            info="将本批次成功生成的 PDF 压缩打包"
+                        )
+                        zip_mode_dd = gr.Dropdown(
+                            label="ZIP 交付策略",
+                            choices=["保留独立 PDF + ZIP (both)", "仅保留 ZIP (zip_only)"],
+                            value="保留独立 PDF + ZIP (both)" if cfg.get("zip_delivery_mode", "both") == "both" else "仅保留 ZIP (zip_only)",
+                            interactive=cfg.get("generate_zip", False),
+                            scale=2
+                        )
+
+                    with gr.Row():
+                        output_dir_box = gr.Textbox(
+                            label="成果保存根目录",
+                            value=cfg.get("output_dir", get_default_output_dir()),
+                            interactive=True,
+                            scale=4
+                        )
+                        browse_dir_btn = gr.Button("📂 浏览选择...", variant="secondary", scale=1)
+
+                with gr.Accordion("🔑 API 与模型连接配置 (自动保存)", open=False):
+                    base_url = gr.Textbox(label="OpenAI 兼容 Base URL", value=cfg.get("base_url", "https://moyuu.cc/v1"))
+                    with gr.Row():
+                        api_key = gr.Textbox(label="API Key", type="password", value=cfg.get("api_key", ""), scale=3)
+                        model = gr.Textbox(label="Model 代号", value=cfg.get("model", "gemini-3.1-flash-lite-preview"), scale=2)
+
+                with gr.Accordion("🌐 语言与排版参数", open=False):
+                    with gr.Row():
+                        lang_in_dd = gr.Dropdown(
+                            label="源语言",
+                            choices=list(LANG_MAP.keys()),
+                            value=LANG_REV_MAP.get(cfg.get("lang_in", "en"), "英语 (English)"),
+                            scale=2
+                        )
+                        lang_out_dd = gr.Dropdown(
+                            label="目标语言",
+                            choices=list(LANG_MAP.keys()),
+                            value=LANG_REV_MAP.get(cfg.get("lang_out", "zh"), "简体中文 (Simplified Chinese)"),
+                            scale=2
+                        )
+                        qps = gr.Textbox(label="并发线程数 (QPS)", value=cfg.get("qps", "4"), scale=1)
+                    translate_table = gr.Checkbox(
+                        label="开启表格内容翻译 (--translate-table-text)",
+                        value=cfg.get("translate_table_text", True),
+                        info="规格书必开：解析并翻译电气特性与引脚表。"
+                    )
+
+                with gr.Accordion("🎯 提示词预设库 (Prompt Management)", open=False):
+                    prompt_keys = list(prompts.keys())
+                    current_key = cfg.get("current_prompt_title", prompt_keys[0])
+                    if current_key not in prompt_keys:
+                        current_key = prompt_keys[0]
+
+                    with gr.Row():
+                        prompt_selector = gr.Dropdown(label="选择场景模板", choices=prompt_keys, value=current_key, scale=3)
+                        del_prompt_btn = gr.Button("🗑️ 删除模板", variant="secondary", scale=1)
+
+                    prompt_name_input = gr.Textbox(label="当前模板名称", value=current_key)
+                    system_prompt = gr.Textbox(label="系统提示词指令", lines=5, value=prompts[current_key])
+                    save_prompt_btn = gr.Button("💾 保存 / 更新此提示词模板", variant="secondary")
+
+                # 任务主操作区
+                with gr.Row():
+                    start_trans_btn = gr.Button("✨ 开始排版翻译", variant="primary", scale=3, size="lg")
+                    stop_after_btn = gr.Button("⏸️ 完成当前后停止", variant="secondary", scale=2)
+                    cancel_now_btn = gr.Button("⏹️ 立即取消整批", variant="secondary", scale=2)
+
+                with gr.Accordion("📜 运行与内核日志 (实时增量滚动)", open=False):
+                    log_output = gr.Textbox(
+                        label="Log Stream",
+                        lines=9,
+                        interactive=False,
+                        elem_classes=["log-box"],
+                        value="就绪。\n"
+                    )
+
+            # ================= 右侧成果与任务管理 =================
+            with gr.Column(scale=5):
+                gr.Markdown("### 📖 翻译成果预览与任务历史")
+
+                # 批次状态与快速操作
+                with gr.Row():
+                    open_curr_folder_btn = gr.Button("📁 一键打开成果文件夹", variant="primary", scale=2)
+                    repack_zip_btn = gr.Button("📦 补打/重新打包 ZIP", variant="secondary", scale=2)
+
+                batch_summary_md = gr.Markdown("当前尚无正在运行或完成的批次。")
+
+                with gr.Row():
+                    pdf_result_selector = gr.Dropdown(allow_custom_value=True, 
+                        label="📑 选择已完成的文件版本 (按文档归组，点击即预览)",
+                        choices=[],
+                        value="",
+                        interactive=True,
+                        visible=False,
+                        scale=4
+                    )
+                    retry_failed_btn = gr.Button("🔄 重试本批失败文件", variant="secondary", visible=False, scale=2)
+
+                with gr.Row(visible=False) as download_row:
+                    batch_zip_file = gr.File(label="📦 ZIP 交付包", interactive=False)
+                    single_pdf_file = gr.File(label="📄 当前选中的 PDF", interactive=False)
+
+                # PDF 阅读器
+                output_preview = PDF(label="桌面内置 PDF 阅读器", height=660)
+
+                with gr.Accordion("📋 历史任务批次记录", open=False):
+                    history_dropdown = gr.Dropdown(label="选择历史批次", choices=[], allow_custom_value=True)
+                    history_detail_md = gr.Markdown("无历史记录")
+                    open_hist_folder_btn = gr.Button("📂 打开该历史批次目录", variant="secondary", size="sm")
+
+        # 每秒刷新定时器，用于实时驱动日志与任务进度展示
+        timer = gr.Timer(1.0)
+
+        # ================= 事件绑定 =================
+        # 输出配置即时自动保存
+        def on_output_cfg_change(mono_v, dual_v, zip_v, zip_m, out_d):
+            if not mono_v and not dual_v:
+                gr.Warning("注意：仅译文(mono)与双语对照(dual)不能同时关闭，已为您自动重置为双语对照！")
+                dual_v = True
+            mode_val = "both" if "both" in zip_m else "zip_only"
+            save_app_config({
+                "output_mono": bool(mono_v),
+                "output_dual": bool(dual_v),
+                "generate_zip": bool(zip_v),
+                "zip_delivery_mode": mode_val,
+                "output_dir": out_d.strip()
+            })
+            return mono_v, dual_v, gr.update(interactive=bool(zip_v))
+
+        for comp in [out_mono_cb, out_dual_cb, gen_zip_cb, zip_mode_dd, output_dir_box]:
+            comp.change(
+                fn=on_output_cfg_change,
+                inputs=[out_mono_cb, out_dual_cb, gen_zip_cb, zip_mode_dd, output_dir_box],
+                outputs=[out_mono_cb, out_dual_cb, zip_mode_dd]
+            )
+
+        browse_dir_btn.click(
+            fn=pick_folder_dialog,
+            inputs=[output_dir_box],
+            outputs=[output_dir_box]
+        )
+
+        # 待翻译文件拖拽追加
+        def on_files_uploaded(incoming_files):
+            if not incoming_files:
+                return format_pending_display(), None
+            paths = [f.name if hasattr(f, 'name') else str(f) for f in incoming_files]
+            # 若当前有任务正在运行，则动态追加到活动批次；否则加入待办
+            if tm.active_batch and tm.active_batch.status == "running":
+                added, msg = tm.append_to_active_batch(paths)
+                gr.Info(msg)
+            else:
+                added, names = tm.add_to_pending(paths)
+                gr.Info(f"已添加 {added} 个文档至待翻译列表")
+            return format_pending_display(), None
+
+        file_input.upload(
+            fn=on_files_uploaded,
+            inputs=[file_input],
+            outputs=[pending_display, file_input]
+        )
+
+        remove_last_btn.click(
+            fn=lambda: (tm.remove_from_pending(len(tm.pending_queue)-1), format_pending_display())[1],
+            inputs=None,
+            outputs=[pending_display]
+        )
+
+        clear_btn.click(
+            fn=lambda: (tm.clear_pending(), format_pending_display())[1],
+            inputs=None,
+            outputs=[pending_display]
+        )
+
+        # 提示词管理
+        prompt_selector.change(
+            fn=lambda k, p: (k, p.get(k, "")),
+            inputs=[prompt_selector, prompt_state],
+            outputs=[prompt_name_input, system_prompt]
+        )
+
+        def on_save_prompt_handler(title, text, cur_prompts):
+            if not title.strip():
+                gr.Warning("模板名称不能为空！")
+                return gr.update(), cur_prompts
+            new_p = dict(cur_prompts)
+            new_p[title.strip()] = text.strip()
+            save_prompts(new_p)
+            save_app_config({"current_prompt_title": title.strip()})
+            gr.Info(f"已保存场景模板: {title.strip()}")
+            return gr.update(choices=list(new_p.keys()), value=title.strip()), new_p
+
+        save_prompt_btn.click(
+            fn=on_save_prompt_handler,
+            inputs=[prompt_name_input, system_prompt, prompt_state],
+            outputs=[prompt_selector, prompt_state]
+        )
+
+        def on_delete_prompt_handler(selected_t, cur_prompts):
+            if len(cur_prompts) <= 1:
+                gr.Warning("至少保留一个模板！")
+                return gr.update(), gr.update(), cur_prompts
+            new_p = dict(cur_prompts)
+            if selected_t in new_p:
+                del new_p[selected_t]
+            new_first = list(new_p.keys())[0]
+            save_prompts(new_p)
+            gr.Info(f"已删除模板: {selected_t}")
+            return gr.update(choices=list(new_p.keys()), value=new_first), new_p[new_first], new_p
+
+        del_prompt_btn.click(
+            fn=on_delete_prompt_handler,
+            inputs=[prompt_selector, prompt_state],
+            outputs=[prompt_selector, system_prompt, prompt_state]
+        ).then(
+            fn=lambda sel: sel,
+            inputs=[prompt_selector],
+            outputs=[prompt_name_input]
+        )
+
+        # 开始翻译
+        def on_start_translation(mono_v, dual_v, zip_v, zip_m, out_d, b_url, key, mdl, l_in, l_out, qps_v, tbl_v, prompt_t):
+            if not tm.pending_queue:
+                raise gr.Error("待翻译清单为空，请先拖入或添加 PDF 文档！")
+            if not mono_v and not dual_v:
+                raise gr.Error("至少需要勾选一种 PDF 输出（仅译文 或 双语对照）！")
+
+            zip_m_str = "both" if "both" in zip_m else "zip_only"
+            # 保存当前所有配置
+            save_app_config({
+                "base_url": b_url.strip(),
+                "api_key": key.strip(),
+                "model": mdl.strip(),
+                "lang_in": LANG_MAP.get(l_in, "en"),
+                "lang_out": LANG_MAP.get(l_out, "zh"),
+                "qps": str(qps_v),
+                "translate_table_text": bool(tbl_v),
+                "output_mono": bool(mono_v),
+                "output_dual": bool(dual_v),
+                "generate_zip": bool(zip_v),
+                "zip_delivery_mode": zip_m_str,
+                "output_dir": out_d.strip()
+            })
+
+            opts = {
+                "base_url": b_url.strip(),
+                "api_key": key.strip(),
+                "model": mdl.strip(),
+                "lang_in": LANG_MAP.get(l_in, "en"),
+                "lang_out": LANG_MAP.get(l_out, "zh"),
+                "qps": str(qps_v),
+                "translate_table_text": bool(tbl_v),
+                "system_prompt": prompt_t.strip(),
+                "output_mono": bool(mono_v),
+                "output_dual": bool(dual_v),
+                "generate_zip": bool(zip_v),
+                "zip_delivery_mode": zip_m_str,
+                "output_dir": out_d.strip()
+            }
+
+            started = tm.start_batch(opts)
+            if not started:
+                raise gr.Error("启动失败：可能已有任务正在运行或待办为空。")
+            gr.Info("已成功启动批量排版翻译任务！")
+            return format_pending_display()
+
+        start_trans_btn.click(
+            fn=on_start_translation,
+            inputs=[
+                out_mono_cb, out_dual_cb, gen_zip_cb, zip_mode_dd, output_dir_box,
+                base_url, api_key, model, lang_in_dd, lang_out_dd, qps, translate_table, system_prompt
+            ],
+            outputs=[pending_display]
+        )
+
+        # 停止控制
+        stop_after_btn.click(
+            fn=lambda: tm.request_stop("stop_after_current"),
+            inputs=None,
+            outputs=None
+        )
+
+        cancel_now_btn.click(
+            fn=lambda: tm.request_stop("cancel_immediately"),
+            inputs=None,
+            outputs=None
+        )
+
+        # 打开所在文件夹
+        open_curr_folder_btn.click(
+            fn=lambda: open_folder(tm.active_batch.output_dir if tm.active_batch else cfg.get("output_dir")),
+            inputs=None,
+            outputs=None
+        )
+
+        # 补打/重新打包 ZIP
+        def on_repack_zip():
+            if not tm.active_batch:
+                gr.Warning("当前无活动批次。")
+                return None
+            ok, res = tm.pack_existing_batch_zip(tm.active_batch.batch_id, delete_standalone_pdfs=False)
+            if ok:
+                gr.Info(f"成功打包 ZIP: {Path(res).name}")
+                return res
+            else:
+                gr.Warning(res)
+                return None
+
+        repack_zip_btn.click(
+            fn=on_repack_zip,
+            inputs=None,
+            outputs=[batch_zip_file]
+        )
+
+        # 切换成果预览
+        def on_switch_result(selected_option):
+            if not selected_option or not tm.active_batch:
+                return None, None
+            # selected_option 格式类似: "📄 sample.pdf [双语对照 dual]" -> 查找对应真实路径
+            batch_dir = Path(tm.active_batch.output_dir)
+            for t in tm.active_batch.tasks:
+                if t.filename in selected_option:
+                    if "仅译文 mono" in selected_option and t.mono_output and Path(t.mono_output).exists():
+                        return t.mono_output, t.mono_output
+                    if "双语对照 dual" in selected_option and t.dual_output and Path(t.dual_output).exists():
+                        return t.dual_output, t.dual_output
+            # 尝试直接按文件名匹配
+            for p in list(batch_dir.glob("*.pdf")):
+                if p.name in selected_option:
+                    return str(p), str(p)
+            return None, None
+
+        pdf_result_selector.change(
+            fn=on_switch_result,
+            inputs=[pdf_result_selector],
+            outputs=[single_pdf_file, output_preview]
+        )
+
+        # 重试失败文件
+        def on_retry_failed_click(b_url, key, mdl):
+            if not tm.active_batch:
+                gr.Warning("当前无活动批次！")
+                return
+            conn = {"base_url": b_url.strip(), "api_key": key.strip(), "model": mdl.strip()}
+            ok = tm.retry_failed_tasks(tm.active_batch.batch_id, conn)
+            if ok:
+                gr.Info("已将失败文件重新加入队列并启动重试！")
+            else:
+                gr.Warning("未找到可重试的失败或取消任务。")
+
+        retry_failed_btn.click(
+            fn=on_retry_failed_click,
+            inputs=[base_url, api_key, model],
+            outputs=None
+        )
+
+        # 历史记录切换
+        def on_history_select(selected_b_id):
+            if not selected_b_id:
+                return "请选择历史批次", gr.update()
+            target = None
+            for r in tm.history_records:
+                if r["batch_id"] == selected_b_id:
+                    target = r
+                    break
+            if not target:
+                return "未找到记录", gr.update()
+
+            md = [
+                f"### 批次: {target['batch_id']}",
+                f"- **状态**: {target['status']} ({target['summary_message']})",
+                f"- **创建时间**: {target['created_at']}",
+                f"- **成果目录**: `{target['output_dir']}`",
+                f"- **ZIP 包**: `{Path(target['zip_path']).name if target.get('zip_path') else '无'}`",
+                "\n**包含文档**："
+            ]
+            for t in target["tasks"]:
+                ico = "✓" if t["status"] == "success" else ("✗" if t["status"] == "failed" else "⏸")
+                err = f" ({t['error_message']})" if t.get("error_message") else ""
+                md.append(f"- {ico} **{t['filename']}**: `{t['status']}`{err}")
+            return "\n".join(md), selected_b_id
+
+        history_dropdown.change(
+            fn=on_history_select,
+            inputs=[history_dropdown],
+            outputs=[history_detail_md, selected_batch_id]
+        )
+
+        open_hist_folder_btn.click(
+            fn=lambda b_id: [open_folder(r["output_dir"]) for r in tm.history_records if r["batch_id"] == b_id],
+            inputs=[selected_batch_id],
+            outputs=None
+        )
+
+        # 定时轮询更新（实时增量日志、任务进度状态卡与产物下拉）
+        def on_timer_tick(current_choice):
+            with tm.lock:
+                log_txt = "".join(tm.logs[-150:]) if tm.logs else "等待任务启动...\n"
+                if not tm.active_batch:
+                    # 仅刷新历史批次选项
+                    hist_choices = [r["batch_id"] for r in tm.history_records]
+                    return (
+                        log_txt,
+                        "当前尚无正在运行或完成的批次。",
+                        gr.update(choices=[], visible=False),
+                        gr.update(visible=False),
+                        gr.update(visible=False),
+                        None,
+                        gr.update(choices=hist_choices)
+                    )
+
+                b = tm.active_batch
+                total_cnt = len(b.tasks)
+                succ_cnt = sum(1 for t in b.tasks if t.status == "success")
+                fail_cnt = sum(1 for t in b.tasks if t.status == "failed")
+                canc_cnt = sum(1 for t in b.tasks if t.status == "cancelled")
+                proc_cnt = sum(1 for t in b.tasks if t.status == "processing")
+
+                status_color = "#DA7756" if b.status == "running" else ("#2E7D32" if b.status == "completed" else "#C62828")
+                summary_html = f"""
+                <div style='background: #FFF; border: 1px solid #E5E4DE; border-radius: 8px; padding: 10px; margin-bottom: 8px;'>
+                    <b>批次编号:</b> {b.batch_id} | <span style='color: {status_color}; font-weight: bold;'>{b.status.upper()}</span><br/>
+                    <b>进度概览:</b> 共 {total_cnt} 篇 (完成 <span style='color:#2E7D32;'>{succ_cnt}</span> / 处理中 {proc_cnt} / 失败 <span style='color:#C62828;'>{fail_cnt}</span> / 取消 {canc_cnt})<br/>
+                    <b>输出路径:</b> <small>{b.output_dir}</small>
+                </div>
+                """
+
+                # 提取所有可预览的成果项（按文档归组展示仅译文/双语对照）
+                choices = []
+                for t in b.tasks:
+                    if t.mono_output and Path(t.mono_output).exists():
+                        choices.append(f"📄 {t.filename} [仅译文 mono]")
+                    if t.dual_output and Path(t.dual_output).exists():
+                        choices.append(f"📄 {t.filename} [双语对照 dual]")
+
+                new_choice = current_choice if current_choice in choices else (choices[0] if choices else "")
+                has_results = len(choices) > 0
+                has_failures = (fail_cnt + canc_cnt) > 0 and b.status != "running"
+
+                zip_comp_val = b.zip_path if b.zip_path and Path(b.zip_path).exists() else None
+                hist_choices = [r["batch_id"] for r in tm.history_records]
+
+                return (
+                    log_txt,
+                    summary_html,
+                    gr.update(choices=choices, value=new_choice, visible=has_results),
+                    gr.update(visible=has_failures),
+                    gr.update(visible=has_results or bool(zip_comp_val)),
+                    zip_comp_val,
+                    gr.update(choices=hist_choices)
+                )
+
+        timer.tick(
+            fn=on_timer_tick,
+            inputs=[pdf_result_selector],
+            outputs=[
+                log_output,
+                batch_summary_md,
+                pdf_result_selector,
+                retry_failed_btn,
+                download_row,
+                batch_zip_file,
+                history_dropdown
+            ]
+        )
+
+    return demo

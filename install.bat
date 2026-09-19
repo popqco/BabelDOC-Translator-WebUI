@@ -1,24 +1,42 @@
 @echo off
 chcp 65001 >nul
-title °²×° BabelDOC ·­ÒëÆ÷»·¾³
+title BabelDOC ç¿»è¯‘å™¨ - ç¯å¢ƒåˆå§‹åŒ–
 echo ============================================================
-echo   ÕıÔÚÎªÄã×Ô¶¯ÅäÖÃ BabelDOC ·­Òë»·¾³...
+echo   æ­£åœ¨ä¸º BabelDOC æ¡Œé¢ç¿»è¯‘å™¨åˆå§‹åŒ– Python è¿è¡Œç¯å¢ƒ...
 echo ============================================================
 
-if not exist venv (
-    echo [1/3] ÕıÔÚ´´½¨ Python ¶ÀÁ¢ĞéÄâ»·¾³ (venv)...
-    python -m venv venv
+where python >nul 2>nul
+if errorlevel 1 (
+    echo [é”™è¯¯] æœªæ£€æµ‹åˆ° Pythonã€‚è¯·å…ˆå®‰è£… Python 3.11 å¹¶å‹¾é€‰ "Add Python to PATH"ã€‚
+    pause
+    exit /b 1
 )
 
-echo [2/3] ÕıÔÚ¼¤»îĞéÄâ»·¾³²¢Éı¼¶ pip...
-call venv\Scripts\activate.bat
-python -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple
+if not exist venv (
+    echo [1/3] æ­£åœ¨åˆ›å»ºè™šæ‹Ÿç¯å¢ƒ venv ...
+    python -m venv venv
+    if errorlevel 1 (
+        echo [é”™è¯¯] venv åˆ›å»ºå¤±è´¥ã€‚
+        pause
+        exit /b 1
+    )
+) else (
+    echo [1/3] æ£€æµ‹åˆ°å·²æœ‰ venvï¼Œè·³è¿‡åˆ›å»ºã€‚
+)
 
-echo [3/3] ÕıÔÚ°²×°ÒÀÀµºËĞÄ¿â (BabelDOC 0.6.4 + Gradio + PDF ×é¼ş)...
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+echo [2/3] æ­£åœ¨å‡çº§ pip ...
+venv\Scripts\python.exe -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple
 
+echo [3/3] æ­£åœ¨å®‰è£…ä¾èµ–ï¼ˆBabelDOC 0.6.4 / Gradio / pywebview ...ï¼‰...
+venv\Scripts\python.exe -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+if errorlevel 1 (
+    echo [é”™è¯¯] ä¾èµ–å®‰è£…å¤±è´¥ï¼Œè¯·æ£€æŸ¥ç½‘ç»œåé‡è¯•ã€‚
+    pause
+    exit /b 1
+)
+
+echo.
 echo ============================================================
-echo   ¹§Ï²£¡°²×°ÒÑË³ÀûÍê³É£¡
-echo   ÇëË«»÷ÔËĞĞ run.bat Æô¶¯·­Òë·şÎñ¡£
+echo   å®‰è£…å®Œæˆï¼åŒå‡» start_silent.vbs å³å¯é™é»˜å¯åŠ¨æ¡Œé¢çª—å£ã€‚
 echo ============================================================
 pause

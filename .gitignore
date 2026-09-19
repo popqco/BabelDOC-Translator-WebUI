@@ -1,7 +1,27 @@
-venv/
-outputs/
-*.pyc
+# --- Python ---
 __pycache__/
+*.py[cod]
+*.egg-info/
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+
+# --- Local secrets & runtime state ---
+# 注意：data/config.json 内含 API Key，绝不能提交
+data/config.json
+data/prompts.json
+data/tasks/
+*.tmp
+
+# --- Generated output & caches ---
+outputs/
+tests/test_scratch*/
+tests/test_e2e_out/
 .cache/
 temp/
-config.json
+*.pyc
+
+# --- Debug artifacts ---
+video_frames/

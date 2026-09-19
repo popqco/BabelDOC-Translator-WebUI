@@ -1,5 +1,19 @@
-babeldoc>=0.6.4
-gradio>=5.0.0
+# BabelDOC 桌面翻译器 —— 运行时依赖（Python 3.11）
+# 安装： pip install -r requirements.txt
+
+# --- 翻译内核 ---
+babeldoc==0.6.4
+
+# --- Web UI ---
+gradio>=5.0.0,<6.0.0
 gradio_pdf>=0.0.21
+
+# --- 桌面窗口（pywebview 在 Windows 上依赖 pythonnet） ---
+pywebview>=6.0.0
+pythonnet>=3.0.0
+
+# --- PDF 处理 ---
 pymupdf>=1.26.7
-openai>=1.50.0
+
+# --- 大模型 SDK ---
+openai>=1.59.3
