@@ -70,27 +70,17 @@ def get_venv_python(prefer_windowless: bool = False) -> str:
     return sys.executable
 
 
-def _volume_exists(path: Path) -> bool:
-    """Detect stale absolute paths copied from another machine."""
-    try:
-        anchor = path.anchor
-        if not anchor:
-            return True
-        return Path(anchor).exists()
-    except Exception:
-        return True
-
-
 def _sanitize_output_dir(raw) -> str:
-    """Fall back to the default folder when empty or the drive is missing."""
+    """Fall back to the default folder when the path was copied from another
+    machine (drive missing, or parent directories gone, e.g. old user profile)."""
     default = get_default_output_dir()
     if not raw or not isinstance(raw, str) or not raw.strip():
         return default
     try:
         p = Path(raw.strip())
-        if not _volume_exists(p):
-            return default
-        return str(p)
+        if p.exists() or p.parent.exists():
+            return str(p)
+        return default
     except Exception:
         return default
 
