@@ -1,16 +1,14 @@
 import os
-import sys
 import time
 import json
 import shutil
 import hashlib
 import threading
-import subprocess
 import collections
 from datetime import datetime, timedelta
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
-from typing import Optional, Callable
+from typing import Optional
 
 from core.config import get_base_dir, load_app_config
 from core.translator_adapter import TranslatorAdapter, ensure_offline_assets, get_kernel32
@@ -707,8 +705,10 @@ class TaskManager:
             TranslatorAdapter.safe_create_zip(pdfs, zip_file, verify_content=True)
             if delete_standalone_pdfs:
                 for p in pdfs:
-                    try: p.unlink()
-                    except Exception: pass
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
         except Exception as e:
             return False, f"补打 ZIP 失败: {e}"
 

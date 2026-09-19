@@ -549,7 +549,7 @@ def create_ui():
                 if qps_num <= 0:
                     raise ValueError
             except (TypeError, ValueError):
-                raise gr.Error("并发线程数 (QPS) 必须为大于 0 的数字！")
+                raise gr.Error("并发线程数 (QPS) 必须为大于 0 的数字！") from None
 
             zip_m_str = "both" if "both" in zip_m else "zip_only"
             # 保存当前所有配置

@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 from core.config import get_config_path
 
 PROMPT_FILE = get_config_path().parent / "prompts.json"

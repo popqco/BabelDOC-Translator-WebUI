@@ -1,6 +1,4 @@
-import os
 import sys
-import time
 import shutil
 import unittest
 from pathlib import Path

@@ -1,9 +1,7 @@
 import os
-import sys
 import shutil
 import zipfile
 import subprocess
-from datetime import datetime
 from pathlib import Path
 from core.config import get_base_dir, get_venv_python
 
@@ -55,6 +53,41 @@ def ensure_offline_assets():
                     shutil.copyfile(m, dst)
 
 class TranslatorAdapter:
+    @staticmethod
+    def discover_outputs(work_dir: Path, stem: str, output_mono: bool, output_dual: bool) -> dict:
+        """在隔离工作目录中定位内核产物。
+
+        内核（BabelDOC 0.6.4）以 f"{input_stem}.{lang_out}.mono/dual.pdf" 命名
+        且不改写 stem，因此用 startswith/endswith 过滤而非 glob 模式——
+        文件名含 [ ] * ? 时 glob 模式会失效。
+        """
+        produced = []
+        if work_dir.exists():
+            produced = sorted(
+                (p for p in work_dir.iterdir() if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+
+        mono_path = None
+        dual_path = None
+
+        if output_mono:
+            mono_cands = [p for p in produced
+                          if p.name.startswith(stem) and p.name.endswith(".mono.pdf")]
+            if not mono_cands:
+                raise FileNotFoundError(f"未找到内核生成的仅译文版 PDF: {stem}")
+            mono_path = mono_cands[0]
+
+        if output_dual:
+            dual_cands = [p for p in produced
+                          if p.name.startswith(stem) and p.name.endswith(".dual.pdf")]
+            if not dual_cands:
+                raise FileNotFoundError(f"未找到内核生成的双语对照版 PDF: {stem}")
+            dual_path = dual_cands[0]
+
+        return {"mono": mono_path, "dual": dual_path}
+
     @staticmethod
     def translate_single(
         input_pdf: Path,
@@ -190,41 +223,17 @@ class TranslatorAdapter:
         if code != 0:
             raise RuntimeError(f"文件 {input_pdf.name} 内核执行异常，退出代码: {code}")
 
-        # 检查隔离目录中实际生成的产物。
-        # 内核（BabelDOC 0.6.4）以 f"{input_stem}.{lang_out}.mono/dual.pdf" 命名且不改写 stem，
-        # 因此用 startswith/endswith 过滤而非 glob 模式——文件名含 [ ] * ? 时 glob 会失效。
-        stem = input_pdf.stem
-        produced = []
-        if work_dir.exists():
-            produced = sorted(
-                (p for p in work_dir.iterdir() if p.is_file()),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-
-        mono_path = None
-        dual_path = None
-
-        if output_mono:
-            mono_cands = [p for p in produced
-                          if p.name.startswith(stem) and p.name.endswith(".mono.pdf")]
-            if mono_cands:
-                mono_path = mono_cands[0]
-            else:
-                raise FileNotFoundError(f"未找到内核生成的仅译文版 PDF: {stem}")
-
-        if output_dual:
-            dual_cands = [p for p in produced
-                          if p.name.startswith(stem) and p.name.endswith(".dual.pdf")]
-            if dual_cands:
-                dual_path = dual_cands[0]
-            else:
-                raise FileNotFoundError(f"未找到内核生成的双语对照版 PDF: {stem}")
+        # 检查隔离目录中实际生成的产物
+        paths = TranslatorAdapter.discover_outputs(work_dir, input_pdf.stem, output_mono, output_dual)
+        mono_path = paths["mono"]
+        dual_path = paths["dual"]
 
         if log_cb:
             produced_names = []
-            if mono_path: produced_names.append(mono_path.name)
-            if dual_path: produced_names.append(dual_path.name)
+            if mono_path:
+                produced_names.append(mono_path.name)
+            if dual_path:
+                produced_names.append(dual_path.name)
             log_cb(f"✓ [{file_idx}/{total_files}] 成功生成: {', '.join(produced_names)}\n")
 
         return {
@@ -279,8 +288,10 @@ class TranslatorAdapter:
             # 原子重命名
             tmp_zip.replace(zip_path)
             return True
-        except Exception as e:
+        except Exception:
             if tmp_zip.exists():
-                try: tmp_zip.unlink()
-                except Exception: pass
-            raise e
+                try:
+                    tmp_zip.unlink()
+                except Exception:
+                    pass
+            raise

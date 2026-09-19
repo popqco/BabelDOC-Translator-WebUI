@@ -23,23 +23,25 @@
 ## 🛠️ 在另一台电脑上的部署指南（极简保姆级）
 
 ### 前置环境
-1. **安装 Python 3.10 或 3.11**：
-   - 前往 [Python 官网](https://www.python.org/downloads/) 下载安装包。
+1. **安装 Python 3.10 ~ 3.13（推荐 3.11）**：
+   - 前往 [Python 官网](https://www.python.org/downloads/) 下载安装包（BabelDOC 0.6.4 不支持 3.14+）。
    - **安装时务必勾选最下方的 `Add python.exe to PATH`**（将 Python 添加到系统环境变量）。
 
 ### 部署与一键启动（Windows）
 1. **获取项目代码**：
    - 打开命令行终端运行：
      ```bash
-     git clone https://github.com/popqco/BabelDOC-Hardware-Translator.git
+     git clone https://github.com/popqco/BabelDOC-Translator-WebUI.git BabelDOC-Hardware-Translator
      cd BabelDOC-Hardware-Translator
      ```
    - 或者直接在 GitHub 页面点击绿色的 **`Code -> Download ZIP`**，解压到你电脑的任意文件夹。
 
-2. **一键运行**：
-   - 直接双击文件夹内的 **`run.bat`**！
-   - 脚本会自动检测环境、创建独立虚拟环境（venv）、安装所有所需依赖并拉起网页。
-   - 启动成功后在浏览器中打开：👉 **`http://localhost:7860`**
+2. **初始化环境**：
+   - 双击 **`install.bat`**！脚本会自动挑选兼容的 Python 版本、创建独立虚拟环境（venv）并安装全部依赖（优先使用完全锁定的 `requirements.lock`，清华镜像加速、失败自动回退官方源）。
+
+3. **一键启动**：
+   - 双击 **`start_silent.vbs`**（无黑框桌面窗口）或 **`run.bat`**（带控制台，便于排障）。
+   - 启动后自动弹出原生桌面窗口（WebView2），无需手动开浏览器；端口随机分配，设置 `BABELDOC_PORT` 环境变量可固定。
 
 ---
 
@@ -52,8 +54,22 @@
    - 提示词预设库默认已勾选“🛠️ 硬件工程师 / 芯片规格书 (Datasheet)”。
 3. **开始翻译**：
    - 拖入你要翻译的 PDF，点击 **“✨ 开始高质量排版翻译”**，稍等片刻即可在右侧预览并一键下载双语对照 PDF！
+4. **批量与中断恢复**：
+   - 支持多次拖拽排队、翻译中动态追加；批次启动即持久化进度，程序意外退出后重启可对中断批次一键重试。
+
+---
+
+## 🧑‍💻 开发者
+
+```bash
+pip install -r requirements.lock   # 或 requirements.txt（宽松约束）
+pip install pytest ruff            # 开发工具
+pytest                             # 运行测试（运行时状态自动隔离到临时目录）
+ruff check .                       # 代码检查
+```
 
 ---
 
 ## 📜 开源协议与致谢
 - 本项目基于 [funstory-ai/BabelDOC](https://github.com/funstory-ai/BabelDOC) 开源文档排版与翻译引擎开发。
+- 本项目自身以 [MIT License](LICENSE) 开源；`assets/fonts/` 内字体遵循各自上游许可（SIL OFL / Apache 2.0 等）。

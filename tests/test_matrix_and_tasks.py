@@ -16,11 +16,7 @@ from core.task_manager import TaskManager, DocumentTask, BatchRecord
 
 class TestSelectiveOutputsAndTaskManager(unittest.TestCase):
     def setUp(self):
-        # 备份真实配置与历史，避免测试污染本机 data/ 下的运行状态
-        self._cfg_file = BASE_DIR / "data" / "config.json"
-        self._cfg_backup = self._cfg_file.read_text(encoding="utf-8") if self._cfg_file.exists() else None
-        self._hist_file = BASE_DIR / "data" / "tasks" / "history.json"
-        self._hist_backup = self._hist_file.read_text(encoding="utf-8") if self._hist_file.exists() else None
+        # data/ 已由 conftest.isolated_runtime 重定向至临时目录，无需再备份真实数据
         self.test_root = BASE_DIR / "tests" / "test_scratch"
         self.test_root.mkdir(parents=True, exist_ok=True)
         self.fixture_a = self.test_root / "test_doc_a.pdf"
@@ -29,15 +25,6 @@ class TestSelectiveOutputsAndTaskManager(unittest.TestCase):
         self._create_dummy_pdf(self.fixture_b, "Doc B Content")
 
     def tearDown(self):
-        if self._cfg_backup is not None:
-            self._cfg_file.write_text(self._cfg_backup, encoding="utf-8")
-        elif self._cfg_file.exists():
-            self._cfg_file.unlink()
-        if self._hist_backup is not None:
-            self._hist_file.parent.mkdir(parents=True, exist_ok=True)
-            self._hist_file.write_text(self._hist_backup, encoding="utf-8")
-        elif self._hist_file.exists():
-            self._hist_file.unlink()
         shutil.rmtree(self.test_root, ignore_errors=True)
 
     def _create_dummy_pdf(self, path: Path, text: str):
