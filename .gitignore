@@ -25,3 +25,6 @@ dist/
 
 # --- Debug artifacts ---
 video_frames/
+
+# --- Local tooling state ---
+.zcode/
