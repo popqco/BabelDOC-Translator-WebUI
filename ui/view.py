@@ -398,9 +398,10 @@ def create_ui():
                     )
                     retry_failed_btn = gr.Button("🔄 重试本批失败文件", variant="secondary", visible=False, scale=2)
 
+                # 交付行：仅当本批次实际生成了 ZIP 时才显示（不再放冗余的
+                # "当前选中的 PDF"占位框——预览已由下方阅读器承担）
                 with gr.Row(visible=False) as download_row:
                     batch_zip_file = gr.File(label="📦 ZIP 交付包", interactive=False)
-                    single_pdf_file = gr.File(label="📄 当前选中的 PDF", interactive=False)
 
                 # PDF 阅读器
                 output_preview = PDF(label="桌面内置 PDF 阅读器", height=660)
@@ -651,20 +652,20 @@ def create_ui():
             outputs=[batch_zip_file]
         )
 
-        # 切换成果预览：下拉选项改为 (展示名, 真实路径) 二元组，
+        # 切换成果预览：下拉选项为 (展示名, 真实路径) 二元组，
         # 直接按路径精确匹配，不再用文件名子串猜测
         def on_switch_result(selected_path):
             if not selected_path:
-                return None, None
+                return None
             if Path(selected_path).exists():
-                return selected_path, selected_path
+                return selected_path
             gr.Warning("所选文件已不存在（可能已被移动或清理）。")
-            return None, None
+            return None
 
         pdf_result_selector.change(
             fn=on_switch_result,
             inputs=[pdf_result_selector],
-            outputs=[single_pdf_file, output_preview]
+            outputs=[output_preview]
         )
 
         # 重试失败文件
@@ -741,21 +742,21 @@ def create_ui():
                 logs_tail = list(tm.logs)[-150:]
                 if not tm.active_batch:
                     hist_ids = [r["batch_id"] for r in tm.history_records]
-                    if prev_render.get("phase") == "empty":
-                        return (
-                            "".join(logs_tail) if logs_tail else "等待任务启动...\n",
-                            gr.update(), gr.update(), gr.update(), gr.update(),
-                            gr.update(), gr.update(), None, prev_render
-                        )
-                    empty_render = {"phase": "empty"}
+                    log_txt = "".join(logs_tail) if logs_tail else "等待任务启动...\n"
+                    if prev_render.get("phase") == "empty" and prev_render.get("log") == log_txt:
+                        # 空闲态且无新日志：全部跳过更新
+                        return (gr.update(), gr.update(), gr.update(), gr.update(),
+                                gr.update(), gr.update(), gr.update(), None, prev_render)
+                    empty_render = {"phase": "empty", "log": log_txt}
+                    first_empty = prev_render.get("phase") != "empty"
                     return (
-                        "".join(logs_tail) if logs_tail else "等待任务启动...\n",
-                        "当前尚无正在运行或完成的批次。",
-                        gr.update(choices=[], visible=False),
-                        gr.update(visible=False),
-                        gr.update(visible=False),
+                        log_txt,
+                        "当前尚无正在运行或完成的批次。" if first_empty else gr.update(),
+                        gr.update(choices=[], visible=False) if first_empty else gr.update(),
+                        gr.update(visible=False) if first_empty else gr.update(),
+                        gr.update(visible=False) if first_empty else gr.update(),
                         gr.update(value=None) if prev_zip else gr.update(),
-                        gr.update(choices=hist_ids),
+                        gr.update(choices=hist_ids) if first_empty else gr.update(),
                         None,
                         empty_render
                     )
@@ -790,8 +791,7 @@ def create_ui():
             </div>
             """
 
-            # 提取所有可预览的成果项：(展示名, 真实路径) 二元组，
-            # 下拉的 value 即真实路径，消费端按路径精确匹配
+            # 提取所有可预览的成果项：(展示名, 真实路径) 二元组
             choices = []
             for _, fname, mono_p, dual_p in snapshot["tasks"]:
                 if mono_p and Path(mono_p).exists():
@@ -800,7 +800,6 @@ def create_ui():
                     choices.append((f"📄 {fname} [双语对照 dual]", dual_p))
 
             choice_values = [v for _, v in choices]
-            new_choice = current_choice if current_choice in choice_values else (choice_values[0] if choice_values else "")
             has_results = len(choices) > 0
             has_failures = (fail_cnt + canc_cnt) > 0 and snapshot["status"] != "running"
 
@@ -816,24 +815,29 @@ def create_ui():
             # 各组件渲染签名：与上一秒一致则返回 gr.update()（跳过 DOM 更新，消除闪烁）
             render = {
                 "phase": "batch",
+                "log": log_txt,
                 "summary": summary_html,
-                "choices": (tuple(choice_values), new_choice, has_results),
+                "choices": (tuple(choice_values), has_results),
                 "retry": has_failures,
-                "row": (has_results or zip_ok),
+                "row": zip_ok,
                 "hist": tuple(hist_ids),
             }
+            out_log = log_txt if render["log"] != prev_render.get("log") else gr.update()
             out_summary = summary_html if render["summary"] != prev_render.get("summary") else gr.update()
-            out_choices = (gr.update(choices=choices, value=new_choice, visible=has_results)
+            # 注意：不带 value 更新下拉——程序化设置 value 会触发 change 事件
+            # 打断/重载 PDF 预览；预览切换完全交给用户手动选择
+            out_choices = (gr.update(choices=choices, visible=has_results)
                            if render["choices"] != prev_render.get("choices") else gr.update())
             out_retry = (gr.update(visible=has_failures)
                          if render["retry"] != prev_render.get("retry") else gr.update())
-            out_row = (gr.update(visible=render["row"])
+            # 交付行仅在实际生成 ZIP 时显示
+            out_row = (gr.update(visible=zip_ok)
                        if render["row"] != prev_render.get("row") else gr.update())
             out_hist = (gr.update(choices=hist_ids)
                         if render["hist"] != prev_render.get("hist") else gr.update())
 
             return (
-                log_txt,
+                out_log,
                 out_summary,
                 out_choices,
                 out_retry,
@@ -857,7 +861,11 @@ def create_ui():
                 history_dropdown,
                 last_zip_state,
                 last_render_state
-            ]
+            ],
+            # 关键：隐藏轮询事件的 loading 指示器——否则每秒 tick 都会在
+            # 所有 outputs 组件上闪现 loading 遮罩（状态卡闪烁、空 File/PDF
+            # 组件挂"processing | 计时"角标的根源）
+            show_progress="hidden"
         )
 
     return demo

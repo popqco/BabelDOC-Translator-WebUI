@@ -230,3 +230,32 @@ def test_log_buffer_capped(tm):
         tm.log(f"line {i}\n")
     assert len(tm.logs) == 5000
     assert tm.logs[-1] == "line 5999\n"
+
+
+# ---------- 未翻译回退检测 ----------
+
+def _make_text_pdf(tmp_path, name, text):
+    import pymupdf
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), text)
+    path = tmp_path / name
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_looks_untranslated_detection(tmp_path):
+    """内核限流静默回退（输出原文）必须被识别，避免把英文回退当成功"""
+    from core.translator_adapter import _looks_untranslated
+
+    en = _make_text_pdf(tmp_path, "en.pdf",
+                        "Peak Pulse Power (8/20us) Ppp 75 W. Ultra low leakage nA level. Package DFN1006-3.")
+    assert _looks_untranslated(en, "zh") is True
+
+    zh = _make_text_pdf(tmp_path, "zh.pdf",
+                        "特性 峰值脉冲功率 静电放电 符合以下标准 工作温度范围 存储温度范围")
+    assert _looks_untranslated(zh, "zh") is False
+
+    # 非中文目标语言不做判定
+    assert _looks_untranslated(en, "en") is False

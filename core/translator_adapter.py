@@ -1,4 +1,6 @@
 import os
+import re
+import time
 import shutil
 import zipfile
 import subprocess
@@ -6,6 +8,30 @@ from pathlib import Path
 from core.config import get_base_dir, get_venv_python
 
 BASE_DIR = get_base_dir()
+
+
+def _looks_untranslated(pdf_path, lang_out: str) -> bool:
+    """检测产物是否为"未翻译回退版"。
+
+    BabelDOC 内核在 LLM 调用失败（限流/网络错误）时会静默保留原文并正常退出，
+    任务层无从察觉。这里抽取产物前几页文本统计 CJK 字符占比：
+    目标语言为中文而占比过低即判定翻译未生效（纯图扫描页不判定）。
+    """
+    if not lang_out or not str(lang_out).lower().startswith("zh"):
+        return False
+    try:
+        import pymupdf
+        doc = pymupdf.open(str(pdf_path))
+        page_count = len(doc)
+        text = "".join(doc[i].get_text() for i in range(min(page_count, 4)))
+        doc.close()
+    except Exception:
+        return False
+    text = text.strip()
+    if page_count == 0 or len(text) < 40:
+        return False
+    cjk = sum(1 for ch in text if '\u4e00' <= ch <= '\u9fff')
+    return (cjk / len(text)) < 0.03
 
 def get_kernel32():
     """返回已声明 argtypes/restype 的 kernel32 实例。
@@ -170,69 +196,98 @@ class TranslatorAdapter:
         # CREATE_NO_WINDOW 让子进程持有隐藏控制台，stdout 管道照常工作。
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
-        # 启动翻译进程
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-            env=env,
-            creationflags=creationflags
-        )
+        err_hint = re.compile(r"error|failed|429|rate.?limit|timeout|exception", re.I)
 
-        if proc_holder is not None:
-            proc_holder['proc'] = proc
+        # 产物生成后校验目标语言占比：未翻译回退（API 限流/失败）时自动重试一次，
+        # 仍失败则显式报错，绝不把英文回退版当作成功交付
+        max_attempts = 2
+        attempts = 0
+        while True:
+            attempts += 1
+            err_lines: list[str] = []
 
-        # 若提供了 Windows Job Object，将子进程挂载进 job，确保无泄漏
-        if job_object:
-            try:
-                import ctypes
-                kernel32 = get_kernel32()
-                h_proc = kernel32.OpenProcess(0x1F0FFF, False, proc.pid)
-                if h_proc:
-                    kernel32.AssignProcessToJobObject(job_object, h_proc)
-                    kernel32.CloseHandle(h_proc)
-                elif log_cb:
-                    log_cb(f"[WARN] 打开子进程句柄失败（错误码 {ctypes.get_last_error()}），该进程不受 Job Object 保护\n")
-            except Exception as e:
-                if log_cb:
-                    log_cb(f"[WARN] 挂载 Job Object 失败: {e}\n")
+            # 启动翻译进程
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                env=env,
+                creationflags=creationflags
+            )
 
-        try:
-            for line in iter(proc.stdout.readline, ''):
-                line = line.strip()
-                if line:
-                    if log_cb:
-                        log_cb(line + "\n")
-                    if "%" in line and progress_cb:
-                        progress_cb(base_pct + file_span * 0.6, f"[{file_idx}/{total_files}] 翻译中: {input_pdf.name}")
-        except Exception:
-            # 读循环异常（如用户取消导致的 IO 错误）时回收子进程，防止孤儿进程
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            raise
-        finally:
-            try:
-                proc.stdout.close()
-            except Exception:
-                pass
             if proc_holder is not None:
-                proc_holder['proc'] = None
+                proc_holder['proc'] = proc
 
-        code = proc.wait()
+            # 若提供了 Windows Job Object，将子进程挂载进 job，确保无泄漏
+            if job_object:
+                try:
+                    import ctypes
+                    kernel32 = get_kernel32()
+                    h_proc = kernel32.OpenProcess(0x1F0FFF, False, proc.pid)
+                    if h_proc:
+                        kernel32.AssignProcessToJobObject(job_object, h_proc)
+                        kernel32.CloseHandle(h_proc)
+                    elif log_cb:
+                        log_cb(f"[WARN] 打开子进程句柄失败（错误码 {ctypes.get_last_error()}），该进程不受 Job Object 保护\n")
+                except Exception as e:
+                    if log_cb:
+                        log_cb(f"[WARN] 挂载 Job Object 失败: {e}\n")
 
-        if code != 0:
-            raise RuntimeError(f"文件 {input_pdf.name} 内核执行异常，退出代码: {code}")
+            try:
+                for line in iter(proc.stdout.readline, ''):
+                    line = line.strip()
+                    if line:
+                        if log_cb:
+                            log_cb(line + "\n")
+                        if err_hint.search(line) and len(err_lines) < 5:
+                            err_lines.append(line[:200])
+                        if "%" in line and progress_cb:
+                            progress_cb(base_pct + file_span * 0.6, f"[{file_idx}/{total_files}] 翻译中: {input_pdf.name}")
+            except Exception:
+                # 读循环异常（如用户取消导致的 IO 错误）时回收子进程，防止孤儿进程
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                raise
+            finally:
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+                if proc_holder is not None:
+                    proc_holder['proc'] = None
 
-        # 检查隔离目录中实际生成的产物
-        paths = TranslatorAdapter.discover_outputs(work_dir, input_pdf.stem, output_mono, output_dual)
-        mono_path = paths["mono"]
-        dual_path = paths["dual"]
+            code = proc.wait()
+
+            if code != 0:
+                raise RuntimeError(f"文件 {input_pdf.name} 内核执行异常，退出代码: {code}")
+
+            # 检查隔离目录中实际生成的产物
+            paths = TranslatorAdapter.discover_outputs(work_dir, input_pdf.stem, output_mono, output_dual)
+            mono_path = paths["mono"]
+            dual_path = paths["dual"]
+
+            target = mono_path or dual_path
+            if _looks_untranslated(target, lang_out):
+                detail = "；".join(err_lines) if err_lines else "内核日志未见显式错误（疑似限流后静默回退）"
+                if attempts < max_attempts:
+                    if log_cb:
+                        log_cb(f"\n[WARN] 检测到产物未包含目标语言译文（疑似 API 限流/失败回退）。{detail}\n")
+                        log_cb(f"[RETRY] 5 秒后自动重试第 {attempts + 1}/{max_attempts} 次: {input_pdf.name}\n")
+                    time.sleep(5)
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                    work_dir.mkdir(parents=True, exist_ok=True)
+                    continue
+                raise RuntimeError(
+                    f"内核生成了未翻译的回退文档（API 可能限流或失败），已自动重试仍失败。内核提示: {detail}"
+                )
+
+            break
 
         if log_cb:
             produced_names = []
