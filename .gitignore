@@ -32,3 +32,6 @@ video_frames/
 # --- Runtime logs ---
 *.log
 .zcodeignore
+
+# --- Personal learning workspace ---
+learning/
