@@ -451,6 +451,33 @@ def create_ui():
             outputs=[out_mono_cb, out_dual_cb, zip_mode_dd]
         )
 
+        # API 连接配置真实自动保存：面板标题承诺"自动保存"，但此前三个输入框
+        # 从未绑定保存事件，用户粘贴新 API Key 后若不点"开始翻译"就永远不会
+        # 持久化（重试/重启后仍用旧 Key）。绑定 blur 保存（避免每键写盘）。
+        _last_conn = {
+            "base_url": (cfg.get("base_url") or "").strip(),
+            "api_key": (cfg.get("api_key") or "").strip(),
+            "model": (cfg.get("model") or "").strip(),
+        }
+
+        def on_api_cfg_change(b_url, key, mdl):
+            vals = {
+                "base_url": (b_url or "").strip(),
+                "api_key": (key or "").strip(),
+                "model": (mdl or "").strip(),
+            }
+            if vals != _last_conn:
+                save_app_config(vals)
+                _last_conn.update(vals)
+                gr.Info("API 连接配置已自动保存")
+
+        for comp in [base_url, api_key, model]:
+            comp.blur(
+                fn=on_api_cfg_change,
+                inputs=[base_url, api_key, model],
+                outputs=None
+            )
+
         browse_dir_btn.click(
             fn=pick_folder_dialog,
             inputs=[output_dir_box],
@@ -683,6 +710,8 @@ def create_ui():
                 gr.Warning("当前无活动批次！")
                 return
             conn = {"base_url": b_url.strip(), "api_key": key.strip(), "model": mdl.strip()}
+            # 顺手持久化当前连接配置（与"自动保存"承诺一致）
+            save_app_config({"base_url": conn["base_url"], "api_key": conn["api_key"], "model": conn["model"]})
             ok, msg = tm.retry_failed_tasks(batch_id, conn)
             if ok:
                 gr.Info(f"重试已启动！{msg}")
