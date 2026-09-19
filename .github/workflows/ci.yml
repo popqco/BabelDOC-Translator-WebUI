@@ -13,8 +13,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      # 核心模块 (core/, tests/) 仅依赖标准库，CI 无需安装
-      # BabelDOC/Gradio 全家桶；UI 冒烟由本地开发时手动执行
-      - run: pip install pytest ruff
+      # 核心模块 (core/, tests/) 仅依赖标准库；pymupdf 供译文回退检测的
+      # 回归测试使用。ruff 固定版本，避免新版规则导致 CI 与本地结果漂移
+      - run: pip install pytest ruff==0.16.8 pymupdf
       - run: ruff check .
       - run: pytest -q
