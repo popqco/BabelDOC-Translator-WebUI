@@ -1,6 +1,4 @@
-﻿import os
-import sys
-import json
+import os
 import subprocess
 from pathlib import Path
 import gradio as gr
@@ -217,7 +215,7 @@ h1, h2, h3, h4, h5, h6, .markdown h1, .markdown h2, .markdown h3 {
 
 def open_folder(folder_path: str):
     if folder_path and os.path.exists(folder_path):
-        subprocess.Popen(f'explorer.exe "{os.path.normpath(folder_path)}"')
+        subprocess.Popen(["explorer.exe", os.path.normpath(folder_path)])
     else:
         gr.Warning("输出文件夹尚未生成或不存在。")
 
@@ -232,6 +230,8 @@ def pick_folder_dialog(current_val: str):
                 selected_dir = chosen[0]
                 save_app_config({"output_dir": selected_dir})
                 return selected_dir
+        else:
+            gr.Warning("未检测到桌面窗口环境，无法打开系统目录选择框。")
     except Exception as e:
         print(f"Native folder dialog fallback: {e}")
     return current_val
@@ -425,12 +425,19 @@ def create_ui():
             })
             return mono_v, dual_v, gr.update(interactive=bool(zip_v))
 
-        for comp in [out_mono_cb, out_dual_cb, gen_zip_cb, zip_mode_dd, output_dir_box]:
+        # 复选框/下拉用 change 即时保存；输出目录为文本框，
+        # 改用 blur（失焦）保存，避免每敲一个字符就写一次磁盘
+        for comp in [out_mono_cb, out_dual_cb, gen_zip_cb, zip_mode_dd]:
             comp.change(
                 fn=on_output_cfg_change,
                 inputs=[out_mono_cb, out_dual_cb, gen_zip_cb, zip_mode_dd, output_dir_box],
                 outputs=[out_mono_cb, out_dual_cb, zip_mode_dd]
             )
+        output_dir_box.blur(
+            fn=on_output_cfg_change,
+            inputs=[out_mono_cb, out_dual_cb, gen_zip_cb, zip_mode_dd, output_dir_box],
+            outputs=[out_mono_cb, out_dual_cb, zip_mode_dd]
+        )
 
         browse_dir_btn.click(
             fn=pick_folder_dialog,
@@ -443,12 +450,15 @@ def create_ui():
             if not incoming_files:
                 return format_pending_display(), None
             paths = [f.name if hasattr(f, 'name') else str(f) for f in incoming_files]
+            # 运行状态快照（避免绕过锁直接读取共享状态）
+            with tm.lock:
+                running = bool(tm.active_batch and tm.active_batch.status == "running")
             # 若当前有任务正在运行，则动态追加到活动批次；否则加入待办
-            if tm.active_batch and tm.active_batch.status == "running":
+            if running:
                 added, msg = tm.append_to_active_batch(paths)
                 gr.Info(msg)
             else:
-                added, names = tm.add_to_pending(paths)
+                added, _ = tm.add_to_pending(paths)
                 gr.Info(f"已添加 {added} 个文档至待翻译列表")
             return format_pending_display(), None
 
@@ -458,8 +468,18 @@ def create_ui():
             outputs=[pending_display, file_input]
         )
 
+        def on_remove_last():
+            with tm.lock:
+                idx = len(tm.pending_queue) - 1
+                empty = idx < 0
+            if empty:
+                gr.Warning("待翻译列表已为空，没有可移除的文件。")
+            else:
+                tm.remove_from_pending(idx)
+            return format_pending_display()
+
         remove_last_btn.click(
-            fn=lambda: (tm.remove_from_pending(len(tm.pending_queue)-1), format_pending_display())[1],
+            fn=on_remove_last,
             inputs=None,
             outputs=[pending_display]
         )
@@ -517,11 +537,19 @@ def create_ui():
         )
 
         # 开始翻译
-        def on_start_translation(mono_v, dual_v, zip_v, zip_m, out_d, b_url, key, mdl, l_in, l_out, qps_v, tbl_v, prompt_t):
+        def on_start_translation(mono_v, dual_v, zip_v, zip_m, out_d, b_url, key, mdl, l_in, l_out, qps_v, tbl_v, prompt_t, prompt_title):
             if not tm.pending_queue:
                 raise gr.Error("待翻译清单为空，请先拖入或添加 PDF 文档！")
             if not mono_v and not dual_v:
                 raise gr.Error("至少需要勾选一种 PDF 输出（仅译文 或 双语对照）！")
+
+            # QPS 必须为正数，否则直接传给内核会导致启动失败
+            try:
+                qps_num = float(str(qps_v).strip())
+                if qps_num <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise gr.Error("并发线程数 (QPS) 必须为大于 0 的数字！")
 
             zip_m_str = "both" if "both" in zip_m else "zip_only"
             # 保存当前所有配置
@@ -533,6 +561,7 @@ def create_ui():
                 "lang_out": LANG_MAP.get(l_out, "zh"),
                 "qps": str(qps_v),
                 "translate_table_text": bool(tbl_v),
+                "current_prompt_title": (prompt_title or "").strip(),
                 "output_mono": bool(mono_v),
                 "output_dual": bool(dual_v),
                 "generate_zip": bool(zip_v),
@@ -549,6 +578,7 @@ def create_ui():
                 "qps": str(qps_v),
                 "translate_table_text": bool(tbl_v),
                 "system_prompt": prompt_t.strip(),
+                "current_prompt_title": (prompt_title or "").strip(),
                 "output_mono": bool(mono_v),
                 "output_dual": bool(dual_v),
                 "generate_zip": bool(zip_v),
@@ -556,47 +586,54 @@ def create_ui():
                 "output_dir": out_d.strip()
             }
 
-            started = tm.start_batch(opts)
-            if not started:
-                raise gr.Error("启动失败：可能已有任务正在运行或待办为空。")
-            gr.Info("已成功启动批量排版翻译任务！")
+            ok, msg = tm.start_batch(opts)
+            if not ok:
+                raise gr.Error(f"启动失败：{msg}")
+            gr.Info(f"已成功启动批量排版翻译任务（{msg}）！")
             return format_pending_display()
 
         start_trans_btn.click(
             fn=on_start_translation,
             inputs=[
                 out_mono_cb, out_dual_cb, gen_zip_cb, zip_mode_dd, output_dir_box,
-                base_url, api_key, model, lang_in_dd, lang_out_dd, qps, translate_table, system_prompt
+                base_url, api_key, model, lang_in_dd, lang_out_dd, qps, translate_table, system_prompt,
+                prompt_selector
             ],
             outputs=[pending_display]
         )
 
-        # 停止控制
-        stop_after_btn.click(
-            fn=lambda: tm.request_stop("stop_after_current"),
-            inputs=None,
-            outputs=None
-        )
+        # 停止控制（给出明确受理反馈）
+        def on_stop_after():
+            if tm.request_stop("stop_after_current"):
+                gr.Info("已请求【完成当前文档后停止】，后续排队文档将取消。")
+            else:
+                gr.Warning("当前没有正在运行的批次。")
 
-        cancel_now_btn.click(
-            fn=lambda: tm.request_stop("cancel_immediately"),
-            inputs=None,
-            outputs=None
-        )
+        def on_cancel_now():
+            if tm.request_stop("cancel_immediately"):
+                gr.Info("已请求【立即取消整批任务】，正在终止翻译进程。")
+            else:
+                gr.Warning("当前没有正在运行的批次。")
+
+        stop_after_btn.click(fn=on_stop_after, inputs=None, outputs=None)
+        cancel_now_btn.click(fn=on_cancel_now, inputs=None, outputs=None)
 
         # 打开所在文件夹
-        open_curr_folder_btn.click(
-            fn=lambda: open_folder(tm.active_batch.output_dir if tm.active_batch else cfg.get("output_dir")),
-            inputs=None,
-            outputs=None
-        )
+        def on_open_curr_folder():
+            with tm.lock:
+                out_dir = tm.active_batch.output_dir if tm.active_batch else None
+            open_folder(out_dir or cfg.get("output_dir"))
+
+        open_curr_folder_btn.click(fn=on_open_curr_folder, inputs=None, outputs=None)
 
         # 补打/重新打包 ZIP
         def on_repack_zip():
-            if not tm.active_batch:
+            with tm.lock:
+                batch_id = tm.active_batch.batch_id if tm.active_batch else None
+            if not batch_id:
                 gr.Warning("当前无活动批次。")
                 return None
-            ok, res = tm.pack_existing_batch_zip(tm.active_batch.batch_id, delete_standalone_pdfs=False)
+            ok, res = tm.pack_existing_batch_zip(batch_id, delete_standalone_pdfs=False)
             if ok:
                 gr.Info(f"成功打包 ZIP: {Path(res).name}")
                 return res
@@ -610,22 +647,14 @@ def create_ui():
             outputs=[batch_zip_file]
         )
 
-        # 切换成果预览
-        def on_switch_result(selected_option):
-            if not selected_option or not tm.active_batch:
+        # 切换成果预览：下拉选项改为 (展示名, 真实路径) 二元组，
+        # 直接按路径精确匹配，不再用文件名子串猜测
+        def on_switch_result(selected_path):
+            if not selected_path:
                 return None, None
-            # selected_option 格式类似: "📄 sample.pdf [双语对照 dual]" -> 查找对应真实路径
-            batch_dir = Path(tm.active_batch.output_dir)
-            for t in tm.active_batch.tasks:
-                if t.filename in selected_option:
-                    if "仅译文 mono" in selected_option and t.mono_output and Path(t.mono_output).exists():
-                        return t.mono_output, t.mono_output
-                    if "双语对照 dual" in selected_option and t.dual_output and Path(t.dual_output).exists():
-                        return t.dual_output, t.dual_output
-            # 尝试直接按文件名匹配
-            for p in list(batch_dir.glob("*.pdf")):
-                if p.name in selected_option:
-                    return str(p), str(p)
+            if Path(selected_path).exists():
+                return selected_path, selected_path
+            gr.Warning("所选文件已不存在（可能已被移动或清理）。")
             return None, None
 
         pdf_result_selector.change(
@@ -636,15 +665,17 @@ def create_ui():
 
         # 重试失败文件
         def on_retry_failed_click(b_url, key, mdl):
-            if not tm.active_batch:
+            with tm.lock:
+                batch_id = tm.active_batch.batch_id if tm.active_batch else None
+            if not batch_id:
                 gr.Warning("当前无活动批次！")
                 return
             conn = {"base_url": b_url.strip(), "api_key": key.strip(), "model": mdl.strip()}
-            ok = tm.retry_failed_tasks(tm.active_batch.batch_id, conn)
+            ok, msg = tm.retry_failed_tasks(batch_id, conn)
             if ok:
-                gr.Info("已将失败文件重新加入队列并启动重试！")
+                gr.Info(f"重试已启动！{msg}")
             else:
-                gr.Warning("未找到可重试的失败或取消任务。")
+                gr.Warning(msg)
 
         retry_failed_btn.click(
             fn=on_retry_failed_click,
@@ -723,15 +754,17 @@ def create_ui():
                 </div>
                 """
 
-                # 提取所有可预览的成果项（按文档归组展示仅译文/双语对照）
+                # 提取所有可预览的成果项：(展示名, 真实路径) 二元组，
+                # 下拉的 value 即真实路径，消费端按路径精确匹配
                 choices = []
                 for t in b.tasks:
                     if t.mono_output and Path(t.mono_output).exists():
-                        choices.append(f"📄 {t.filename} [仅译文 mono]")
+                        choices.append((f"📄 {t.filename} [仅译文 mono]", t.mono_output))
                     if t.dual_output and Path(t.dual_output).exists():
-                        choices.append(f"📄 {t.filename} [双语对照 dual]")
+                        choices.append((f"📄 {t.filename} [双语对照 dual]", t.dual_output))
 
-                new_choice = current_choice if current_choice in choices else (choices[0] if choices else "")
+                choice_values = [v for _, v in choices]
+                new_choice = current_choice if current_choice in choice_values else (choice_values[0] if choice_values else "")
                 has_results = len(choices) > 0
                 has_failures = (fail_cnt + canc_cnt) > 0 and b.status != "running"
 

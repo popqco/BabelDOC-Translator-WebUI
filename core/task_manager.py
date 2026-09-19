@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import time
 import json
@@ -153,11 +153,16 @@ class TaskManager:
             return
         self._initialized = True
         self.lock = threading.RLock()
+        self._start_lock = threading.RLock()  # 串行化批次启动过程（可重入：重试会复用 start_batch）
         self.job_manager = WindowsJobManager()
 
         self.storage_dir = BASE_DIR / "data" / "tasks"
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.history_file = self.storage_dir / "history.json"
+
+        # 上传暂存目录：上传即刻把文件复制到此（摆脱 Gradio 临时文件的生命周期约束）
+        self.pending_dir = BASE_DIR / "data" / "pending_uploads"
+        self.pending_dir.mkdir(parents=True, exist_ok=True)
 
         # 运行态状态
         self.active_batch: Optional[BatchRecord] = None
@@ -187,9 +192,34 @@ class TaskManager:
                 print(f"Error loading task history: {e}")
 
         # 跨电脑迁移后，历史记录里的绝对路径可能失效；统一打标，UI 据此提示
+        interrupted_changed = False
         for record in records:
+            if record.get("status") == "running":
+                # 上次进程退出时该批次未完成收尾（崩溃/被杀），标记为中断
+                record["status"] = "interrupted"
+                interrupted_changed = True
             self._mark_history_availability(record)
+
+        if interrupted_changed:
+            self.history_records = records
+            self._save_history()
         return records
+
+    def finalize_interrupted(self):
+        """窗口关闭/进程退出前调用：将仍在运行的批次标记为中断并落盘，
+        供下次启动时可见与重试；随后终止残留的翻译子进程树。"""
+        try:
+            with self.lock:
+                batch = self.active_batch
+                if batch and batch.status == "running":
+                    for t in batch.tasks:
+                        if t.status in ("pending", "processing"):
+                            t.status = "cancelled"
+                            t.error_message = "应用程序退出，任务中断"
+                    batch.status = "interrupted"
+                    self._record_history_entry(batch)
+        finally:
+            self.job_manager.terminate_all()
 
     @staticmethod
     def _mark_history_availability(record: dict) -> None:
@@ -227,23 +257,43 @@ class TaskManager:
             return "".join(self.logs)
 
     # ================= 队列管理 =================
+    def _stage_upload(self, p: Path, target_dir: Optional[Path] = None) -> Optional[dict]:
+        """对单个文件计算哈希并复制到暂存目录。
+
+        必须在 self.lock 之外调用：大文件的哈希与复制耗时较长，
+        持锁执行会卡死 UI 的 1 秒轮询。返回 None 表示文件不可用。
+        """
+        try:
+            if not p.exists() or not p.is_file():
+                return None
+            f_hash = calc_file_hash(p)
+            dest_dir = target_dir or self.pending_dir
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            staged_p = dest_dir / f"{p.stem}_{f_hash[:8]}{p.suffix}"
+            if not staged_p.exists():
+                shutil.copyfile(p, staged_p)
+            return {"path": str(staged_p), "original_path": str(p), "name": p.name, "hash": f_hash}
+        except Exception as e:
+            self.log(f"[WARN] 暂存文件失败 {p.name}: {e}\n")
+            return None
+
     def add_to_pending(self, file_paths: list[str]) -> tuple[int, list[str]]:
         """添加文件到待翻译队列，并按 hash 排重"""
+        # 先取现有 hash 做粗筛，避免对重复文件做无谓的整文件哈希
+        with self.lock:
+            existing_hashes = {item["hash"] for item in self.pending_queue}
+        staged_items = []
+        for p_str in file_paths:
+            item = self._stage_upload(Path(p_str))
+            if item and item["hash"] not in existing_hashes:
+                staged_items.append(item)
+
         with self.lock:
             added = 0
-            existing_hashes = {item["hash"] for item in self.pending_queue}
-            for p_str in file_paths:
-                p = Path(p_str)
-                if not p.exists() or not p.is_file():
-                    continue
-                f_hash = calc_file_hash(p)
-                if f_hash not in existing_hashes:
-                    self.pending_queue.append({
-                        "path": str(p),
-                        "name": p.name,
-                        "hash": f_hash
-                    })
-                    existing_hashes.add(f_hash)
+            for item in staged_items:
+                if item["hash"] not in existing_hashes:
+                    self.pending_queue.append(item)
+                    existing_hashes.add(item["hash"])
                     added += 1
             return added, [item["name"] for item in self.pending_queue]
 
@@ -265,57 +315,75 @@ class TaskManager:
         """
         with self.lock:
             if not self.active_batch or self.active_batch.status != "running":
-                added, names = self.add_to_pending(file_paths)
-                return added, "已加入下一批待翻译队列"
-
+                return self._append_fallback(file_paths, "已加入下一批待翻译队列")
             if self.stop_requested_mode is not None:
-                added, names = self.add_to_pending(file_paths)
-                return added, "当前批次正在停止，已为您加入下一批待翻译队列"
+                return self._append_fallback(file_paths, "当前批次正在停止，已为您加入下一批待翻译队列")
 
+            batch_id = self.active_batch.batch_id
             existing_hashes = {t.file_hash for t in self.active_batch.tasks}
-            batch_dir = Path(self.active_batch.output_dir)
-            cache_dir = batch_dir / ".input_cache"
-            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_dir = Path(self.active_batch.output_dir) / ".input_cache"
 
+        # 哈希与复制在锁外进行，避免大文件阻塞 UI 轮询
+        staged_items = []
+        for p_str in file_paths:
+            item = self._stage_upload(Path(p_str), cache_dir)
+            if item and item["hash"] not in existing_hashes:
+                staged_items.append(item)
+
+        with self.lock:
+            batch = self.active_batch
+            if (not batch or batch.batch_id != batch_id
+                    or batch.status != "running" or self.stop_requested_mode is not None):
+                # 批次状态已变化（已收尾/已停止），转入下一批待翻译队列
+                return self._append_staged_to_queue(staged_items, "批次状态已变化，已加入下一批待翻译队列")
+
+            existing_hashes = {t.file_hash for t in batch.tasks}
             added_count = 0
-            for p_str in file_paths:
-                p = Path(p_str)
-                if not p.exists() or not p.is_file():
+            for item in staged_items:
+                if item["hash"] in existing_hashes:
                     continue
-                f_hash = calc_file_hash(p)
-                if f_hash in existing_hashes:
-                    continue
-
-                # 暂存输入副本以备 7 天内重试
-                cached_p = cache_dir / f"{p.stem}_{f_hash[:8]}{p.suffix}"
-                try:
-                    shutil.copyfile(p, cached_p)
-                except Exception:
-                    cached_p = p
-
                 task = DocumentTask(
-                    id=f"task_{len(self.active_batch.tasks)+1}_{int(time.time())}",
-                    original_path=str(p),
-                    filename=p.name,
-                    file_hash=f_hash,
+                    id=f"task_{len(batch.tasks)+1}_{int(time.time())}",
+                    original_path=item["original_path"],
+                    filename=item["name"],
+                    file_hash=item["hash"],
                     status="pending",
-                    cached_input_path=str(cached_p)
+                    cached_input_path=item["path"]
                 )
-                self.active_batch.tasks.append(task)
-                existing_hashes.add(f_hash)
+                batch.tasks.append(task)
+                existing_hashes.add(item["hash"])
                 added_count += 1
 
-            self.log(f"\n[动态追加] 成功向当前批次追加 {added_count} 个待翻译文档！\n")
+            if added_count:
+                self.log(f"\n[动态追加] 成功向当前批次追加 {added_count} 个待翻译文档！\n")
             return added_count, f"已动态追加 {added_count} 个文件至当前运行批次"
 
+    def _append_fallback(self, file_paths: list[str], message: str) -> tuple[int, str]:
+        added, _ = self.add_to_pending(file_paths)
+        return added, message
+
+    def _append_staged_to_queue(self, staged_items: list[dict], message: str) -> tuple[int, str]:
+        with self.lock:
+            existing = {item["hash"] for item in self.pending_queue}
+            added = 0
+            for item in staged_items:
+                if item["hash"] not in existing:
+                    self.pending_queue.append({
+                        "path": item["path"], "name": item["name"], "hash": item["hash"]
+                    })
+                    existing.add(item["hash"])
+                    added += 1
+            return added, message
+
     # ================= 停止控制 =================
-    def request_stop(self, mode: str):
+    def request_stop(self, mode: str) -> bool:
         """
         mode: "stop_after_current" | "cancel_immediately"
+        返回是否真正受理（无运行中批次时为 False，便于 UI 给出反馈）。
         """
         with self.lock:
             if not self.active_batch or self.active_batch.status != "running":
-                return
+                return False
             self.stop_requested_mode = mode
             if mode == "stop_after_current":
                 self.log("\n[用户指令] 已请求【完成当前文档后停止】，后续排队文档将取消...\n")
@@ -329,20 +397,24 @@ class TaskManager:
                     except Exception:
                         pass
                 self.job_manager.terminate_all()
+            return True
 
     # ================= 批次执行主循环 =================
-    def start_batch(self, options: dict) -> bool:
-        with self.lock:
-            if self.active_thread and self.active_thread.is_alive():
-                return False
-            if not self.pending_queue:
-                return False
+    def start_batch(self, options: dict) -> tuple[bool, str]:
+        """启动批次。返回 (是否成功, 原因说明)，供 UI 给出精确反馈。"""
+        with self._start_lock:
+            with self.lock:
+                if self.active_thread and self.active_thread.is_alive():
+                    return False, "已有批次正在运行，请等待完成或先停止当前批次"
+                if not self.pending_queue:
+                    return False, "待翻译队列为空，请先添加 PDF 文件"
 
-            queue_snapshot = list(self.pending_queue)
-            self.pending_queue.clear()
-            self.stop_requested_mode = None
-            self.logs.clear()
+                queue_snapshot = list(self.pending_queue)
+                self.pending_queue.clear()
+                self.stop_requested_mode = None
+                self.logs.clear()
 
+            # ---- 锁外：创建目录、复制输入文件、构建任务（可能耗时） ----
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             batch_id = f"batch_{timestamp}"
 
@@ -361,17 +433,16 @@ class TaskManager:
                 except Exception:
                     cached_p = orig_p
 
-                task = DocumentTask(
+                tasks.append(DocumentTask(
                     id=f"task_{idx}_{int(time.time())}",
                     original_path=item["path"],
                     filename=item["name"],
                     file_hash=item["hash"],
                     status="pending",
                     cached_input_path=str(cached_p)
-                )
-                tasks.append(task)
+                ))
 
-            self.active_batch = BatchRecord(
+            batch = BatchRecord(
                 batch_id=batch_id,
                 created_at=datetime.now().isoformat(),
                 output_dir=str(batch_dir),
@@ -380,9 +451,16 @@ class TaskManager:
                 tasks=tasks
             )
 
-            self.active_thread = threading.Thread(target=self._run_batch_worker, daemon=True)
-            self.active_thread.start()
-            return True
+            with self.lock:
+                self.active_batch = batch
+                # 启动即持久化历史记录：进程若在中途崩溃/退出，
+                # 重启后该批次以 interrupted 状态可见并支持重试
+                self._record_history_entry(batch)
+                thread = threading.Thread(target=self._run_batch_worker, daemon=True)
+                self.active_thread = thread
+
+            thread.start()
+            return True, f"批次已启动，共 {len(tasks)} 个文档"
 
     def _run_batch_worker(self):
         batch = self.active_batch
@@ -540,7 +618,9 @@ class TaskManager:
                 self.log(f"[ERROR] ZIP 打包或校验失败: {e}，将完整保留原 PDF 文件！\n")
 
         with self.lock:
-            batch.zip_path = zip_archive_path
+            # 仅在成功生成时覆盖，保留用户此前手动补打的 ZIP 路径
+            if zip_archive_path:
+                batch.zip_path = zip_archive_path
             if self.stop_requested_mode:
                 batch.status = "stopped"
             elif failed_tasks and not success_tasks:
@@ -561,7 +641,8 @@ class TaskManager:
         self.log(f"\n=== {summary} ===\n")
 
     def _record_history_entry(self, batch: BatchRecord):
-        # 序列化入历史文件
+        # 序列化入历史文件（按 batch_id upsert：批次启动时以 running 状态首次写入，
+        # 收尾/中断时原地更新，保证中途崩溃后仍能恢复）
         record = {
             "batch_id": batch.batch_id,
             "created_at": batch.created_at,
@@ -575,81 +656,101 @@ class TaskManager:
                 "lang_in": batch.options.get("lang_in"),
                 "lang_out": batch.options.get("lang_out"),
                 "model": batch.options.get("model"),
+                "qps": batch.options.get("qps"),
                 "translate_table_text": batch.options.get("translate_table_text"),
-                "current_prompt_title": batch.options.get("current_prompt_title")
+                "current_prompt_title": batch.options.get("current_prompt_title"),
+                "system_prompt": batch.options.get("system_prompt")
             },
             "zip_path": batch.zip_path,
             "summary_message": batch.summary_message,
             "tasks": [asdict(t) for t in batch.tasks]
         }
-        # 插入到最前
-        self.history_records.insert(0, record)
+        # 按 batch_id 原地更新；不存在则插入到最前
+        for i, existing in enumerate(self.history_records):
+            if existing.get("batch_id") == batch.batch_id:
+                self.history_records[i] = record
+                break
+        else:
+            self.history_records.insert(0, record)
         # 最多保留 100 条批次历史
         self.history_records = self.history_records[:100]
         self._save_history()
 
     # ================= 补打 ZIP (事后手动打包) =================
     def pack_existing_batch_zip(self, batch_id: str, delete_standalone_pdfs: bool = False) -> tuple[bool, str]:
+        # 定位批次（锁内只做查找，ZIP 打包在锁外进行，避免大压缩包阻塞 UI 轮询）
         with self.lock:
-            # 找到对应批次
-            target_record = None
-            if self.active_batch and self.active_batch.batch_id == batch_id:
-                target_record = asdict(self.active_batch)
+            is_active = bool(self.active_batch and self.active_batch.batch_id == batch_id)
+            batch_dir = None
+            if is_active:
+                batch_dir = Path(self.active_batch.output_dir)
             else:
                 for r in self.history_records:
                     if r["batch_id"] == batch_id:
-                        target_record = r
+                        batch_dir = Path(r["output_dir"])
                         break
 
-            if not target_record:
+            if not batch_dir:
                 return False, "未找到指定的批次记录"
 
-            batch_dir = Path(target_record["output_dir"])
-            # 寻找该目录下所有成功生成的 pdf
-            pdfs = list(batch_dir.glob("*.mono.pdf")) + list(batch_dir.glob("*.dual.pdf"))
-            if not pdfs:
-                return False, "该批次输出目录下未发现可打包的 PDF 文件"
+        # 寻找该目录下所有成功生成的 pdf
+        pdfs = list(batch_dir.glob("*.mono.pdf")) + list(batch_dir.glob("*.dual.pdf"))
+        if not pdfs:
+            return False, "该批次输出目录下未发现可打包的 PDF 文件"
 
-            zip_file = batch_dir / f"{batch_id}_Archive.zip"
-            try:
-                TranslatorAdapter.safe_create_zip(pdfs, zip_file, verify_content=True)
-                if delete_standalone_pdfs:
-                    for p in pdfs:
-                        try: p.unlink()
-                        except Exception: pass
+        zip_file = batch_dir / f"{batch_id}_Archive.zip"
+        try:
+            TranslatorAdapter.safe_create_zip(pdfs, zip_file, verify_content=True)
+            if delete_standalone_pdfs:
+                for p in pdfs:
+                    try: p.unlink()
+                    except Exception: pass
+        except Exception as e:
+            return False, f"补打 ZIP 失败: {e}"
 
-                # 更新历史记录中的 zip_path
-                target_record["zip_path"] = str(zip_file)
-                self._save_history()
-                return True, str(zip_file)
-            except Exception as e:
-                return False, f"补打 ZIP 失败: {e}"
+        # 写回 zip_path：活动批次写回 BatchRecord 本体（收尾时随 upsert 入库），
+        # 历史批次直接更新记录
+        with self.lock:
+            if is_active and self.active_batch and self.active_batch.batch_id == batch_id:
+                self.active_batch.zip_path = str(zip_file)
+            else:
+                for r in self.history_records:
+                    if r["batch_id"] == batch_id:
+                        r["zip_path"] = str(zip_file)
+                        break
+            self._save_history()
+        return True, str(zip_file)
 
     # ================= 失败文档重试 =================
-    def retry_failed_tasks(self, batch_id: str, current_connection_cfg: dict) -> bool:
+    def retry_failed_tasks(self, batch_id: str, current_connection_cfg: dict) -> tuple[bool, str]:
         """
         重试指定批次中失败或已取消的文件：
         保留原方案的语言、提示词、输出模式，应用最新的 Base URL、API Key 与 Model！
+        保留用户当前已排队的待翻译文件，仅追加失败任务。
         """
-        with self.lock:
-            if self.active_thread and self.active_thread.is_alive():
-                return False
+        with self._start_lock:
+            with self.lock:
+                if self.active_thread and self.active_thread.is_alive():
+                    return False, "已有批次正在运行，无法重试"
 
-            target = None
-            for r in self.history_records:
-                if r["batch_id"] == batch_id:
-                    target = r
-                    break
+                target = None
+                for r in self.history_records:
+                    if r["batch_id"] == batch_id:
+                        target = r
+                        break
 
-            if not target:
-                return False
+                if not target:
+                    return False, "未找到指定的批次记录"
 
-            failed_tasks = [t for t in target["tasks"] if t["status"] in ("failed", "cancelled")]
-            if not failed_tasks:
-                return False
+                failed_tasks = [
+                    t for t in target["tasks"]
+                    if t["status"] in ("failed", "cancelled")
+                ]
+                if not failed_tasks:
+                    return False, "该批次没有失败或被取消的文件"
 
-            # 重新组装待翻译队列
-            self.pending_queue.clear()
+            # 重新组装待翻译队列（不清空用户已排队的文件，仅按 hash 追加）
+            retry_items = []
             for t in failed_tasks:
                 cached_p = Path(t.get("cached_input_path") or "")
                 orig_p = Path(t.get("original_path") or "")
@@ -660,14 +761,23 @@ class TaskManager:
                     valid_p = orig_p
 
                 if valid_p:
-                    self.pending_queue.append({
+                    retry_items.append({
                         "path": str(valid_p),
                         "name": t["filename"],
                         "hash": t["file_hash"]
                     })
 
-            if not self.pending_queue:
-                return False
+            if not retry_items:
+                return False, "失败文件的缓存与原始文件均已不存在（缓存保留 7 天），无法重试"
+
+            with self.lock:
+                existing = {item["hash"] for item in self.pending_queue}
+                added = 0
+                for item in retry_items:
+                    if item["hash"] not in existing:
+                        self.pending_queue.append(item)
+                        existing.add(item["hash"])
+                        added += 1
 
             # 构造新的执行参数：继承原任务语言与模板参数，覆盖当前连接配置
             merged_opts = dict(target["options"])
@@ -678,35 +788,46 @@ class TaskManager:
                 "output_dir": target["output_dir"]  # 归回原批次成果目录
             })
 
-            return self.start_batch(merged_opts)
+            ok, msg = self.start_batch(merged_opts)
+            if ok and added < len(retry_items):
+                msg += f"（其中 {len(retry_items) - added} 个已在队列中，自动去重）"
+            return ok, msg
 
     # ================= 7天过期输入缓存清理 =================
+    def _purge_expired(self, folder: Path, cutoff: datetime):
+        """清理 folder 下按修改时间早于 cutoff 的文件（保留子目录）。"""
+        if not folder.exists():
+            return
+        for item in folder.glob("*"):
+            if not item.is_file():
+                continue
+            try:
+                mtime = datetime.fromtimestamp(item.stat().st_mtime)
+                if mtime < cutoff:
+                    item.unlink()
+            except Exception:
+                pass
+
     def cleanup_expired_cache(self, days: int = 7):
         try:
             now = datetime.now()
             cutoff = now - timedelta(days=days)
 
+            # 上传暂存目录（超过保留期的输入副本）
+            self._purge_expired(self.pending_dir, cutoff)
+
             # 遍历所有 outputs 目录下的 .input_cache
             base_out = BASE_DIR / "outputs"
             if base_out.exists():
                 for cache_folder in base_out.glob("*/.input_cache"):
-                    if cache_folder.is_dir():
-                        for item in cache_folder.glob("*"):
-                            mtime = datetime.fromtimestamp(item.stat().st_mtime)
-                            if mtime < cutoff:
-                                try: item.unlink()
-                                except Exception: pass
+                    self._purge_expired(cache_folder, cutoff)
 
             # 遍历用户自定义 output_dir 中的 .input_cache
             cfg = load_app_config()
             user_out = Path(cfg.get("output_dir", ""))
-            if user_out.exists() and user_out != base_out:
+            if (user_out.exists()
+                    and os.path.normcase(str(user_out)) != os.path.normcase(str(base_out))):
                 for cache_folder in user_out.glob("*/.input_cache"):
-                    if cache_folder.is_dir():
-                        for item in cache_folder.glob("*"):
-                            mtime = datetime.fromtimestamp(item.stat().st_mtime)
-                            if mtime < cutoff:
-                                try: item.unlink()
-                                except Exception: pass
+                    self._purge_expired(cache_folder, cutoff)
         except Exception as e:
             print(f"Error cleaning expired cache: {e}")

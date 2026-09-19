@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import shutil
 import zipfile
@@ -80,6 +80,8 @@ class TranslatorAdapter:
             "--qps", str(qps),
             "--openai",
             "--openai-base-url", base_url.strip(),
+            # BabelDOC 0.6.4 强制要求经 CLI 传入 key（main.py 校验，无环境变量回退），
+            # 因此 key 会出现在子进程命令行中；本应用为单用户本机场景，风险可接受
             "--openai-api-key", api_key.strip(),
             "--openai-model", model.strip(),
         ]
@@ -135,42 +137,61 @@ class TranslatorAdapter:
                 if log_cb:
                     log_cb(f"[WARN] 挂载 Job Object 失败: {e}\n")
 
-        for line in iter(proc.stdout.readline, ''):
-            line = line.strip()
-            if line:
-                if log_cb:
-                    log_cb(line + "\n")
-                if "%" in line and progress_cb:
-                    progress_cb(base_pct + file_span * 0.6, f"[{file_idx}/{total_files}] 翻译中: {input_pdf.name}")
+        try:
+            for line in iter(proc.stdout.readline, ''):
+                line = line.strip()
+                if line:
+                    if log_cb:
+                        log_cb(line + "\n")
+                    if "%" in line and progress_cb:
+                        progress_cb(base_pct + file_span * 0.6, f"[{file_idx}/{total_files}] 翻译中: {input_pdf.name}")
+        except Exception:
+            # 读循环异常（如用户取消导致的 IO 错误）时回收子进程，防止孤儿进程
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+            if proc_holder is not None:
+                proc_holder['proc'] = None
 
-        proc.stdout.close()
         code = proc.wait()
-
-        if proc_holder is not None:
-            proc_holder['proc'] = None
 
         if code != 0:
             raise RuntimeError(f"文件 {input_pdf.name} 内核执行异常，退出代码: {code}")
 
-        # 检查隔离目录中实际生成的产物
+        # 检查隔离目录中实际生成的产物。
+        # 内核（BabelDOC 0.6.4）以 f"{input_stem}.{lang_out}.mono/dual.pdf" 命名且不改写 stem，
+        # 因此用 startswith/endswith 过滤而非 glob 模式——文件名含 [ ] * ? 时 glob 会失效。
         stem = input_pdf.stem
+        produced = []
+        if work_dir.exists():
+            produced = sorted(
+                (p for p in work_dir.iterdir() if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+
         mono_path = None
         dual_path = None
 
         if output_mono:
-            # 查找 mono 候选文件
-            mono_cands = list(work_dir.glob(f"{stem}*.mono.pdf")) or list(work_dir.glob("*mono.pdf"))
+            mono_cands = [p for p in produced
+                          if p.name.startswith(stem) and p.name.endswith(".mono.pdf")]
             if mono_cands:
-                mono_cands.sort(key=lambda p: p.stat().st_mtime, reverse=True)
                 mono_path = mono_cands[0]
             else:
                 raise FileNotFoundError(f"未找到内核生成的仅译文版 PDF: {stem}")
 
         if output_dual:
-            # 查找 dual 候选文件
-            dual_cands = list(work_dir.glob(f"{stem}*.dual.pdf")) or list(work_dir.glob("*dual.pdf"))
+            dual_cands = [p for p in produced
+                          if p.name.startswith(stem) and p.name.endswith(".dual.pdf")]
             if dual_cands:
-                dual_cands.sort(key=lambda p: p.stat().st_mtime, reverse=True)
                 dual_path = dual_cands[0]
             else:
                 raise FileNotFoundError(f"未找到内核生成的双语对照版 PDF: {stem}")
@@ -212,7 +233,12 @@ class TranslatorAdapter:
                         raise FileNotFoundError(f"待打包文件不存在: {p}")
                     arcname = p.name
                     if arcname in seen_names:
-                        arcname = f"{p.parent.name}_{p.name}"
+                        # 逐次递增后缀，保证任意多次重名都能生成唯一条目
+                        base, ext = os.path.splitext(p.name)
+                        n = 1
+                        while f"{base}_{n}{ext}" in seen_names:
+                            n += 1
+                        arcname = f"{base}_{n}{ext}"
                     seen_names.add(arcname)
                     zf.write(p, arcname=arcname)
 
