@@ -9,6 +9,29 @@ from core.config import get_base_dir, get_venv_python
 
 BASE_DIR = get_base_dir()
 
+def get_kernel32():
+    """返回已声明 argtypes/restype 的 kernel32 实例。
+
+    显式声明原型可避免 64 位 HANDLE 被默认 int 返回值截断的隐患；
+    Job Object 的挂接与终止（task_manager / translator_adapter）共用此入口。
+    """
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateJobObject.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32
+
 def ensure_offline_assets():
     local_fonts = BASE_DIR / "assets" / "fonts"
     local_models = BASE_DIR / "assets" / "models"
@@ -128,11 +151,13 @@ class TranslatorAdapter:
         if job_object:
             try:
                 import ctypes
-                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel32 = get_kernel32()
                 h_proc = kernel32.OpenProcess(0x1F0FFF, False, proc.pid)
                 if h_proc:
                     kernel32.AssignProcessToJobObject(job_object, h_proc)
                     kernel32.CloseHandle(h_proc)
+                elif log_cb:
+                    log_cb(f"[WARN] 打开子进程句柄失败（错误码 {ctypes.get_last_error()}），该进程不受 Job Object 保护\n")
             except Exception as e:
                 if log_cb:
                     log_cb(f"[WARN] 挂载 Job Object 失败: {e}\n")

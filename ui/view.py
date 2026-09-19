@@ -722,68 +722,92 @@ def create_ui():
         )
 
         # 定时轮询更新（实时增量日志、任务进度状态卡与产物下拉）
-        def on_timer_tick(current_choice):
+        # 上一次交付给 gr.File 的 ZIP 路径：仅在变化时才更新组件，
+        # 避免每秒对大压缩包做一次重新拷贝/哈希
+        last_zip_state = gr.State(None)
+
+        def on_timer_tick(current_choice, prev_zip):
+            # 锁内只取轻量快照，文件系统探测与拼接放在锁外，
+            # 避免每秒轮询与翻译工作线程互相阻塞
             with tm.lock:
-                log_txt = "".join(tm.logs[-150:]) if tm.logs else "等待任务启动...\n"
+                logs_tail = list(tm.logs)[-150:]
                 if not tm.active_batch:
-                    # 仅刷新历史批次选项
-                    hist_choices = [r["batch_id"] for r in tm.history_records]
+                    hist_ids = [r["batch_id"] for r in tm.history_records]
                     return (
-                        log_txt,
+                        "".join(logs_tail) if logs_tail else "等待任务启动...\n",
                         "当前尚无正在运行或完成的批次。",
                         gr.update(choices=[], visible=False),
                         gr.update(visible=False),
                         gr.update(visible=False),
-                        None,
-                        gr.update(choices=hist_choices)
+                        gr.update(value=None) if prev_zip else gr.update(),
+                        gr.update(choices=hist_ids),
+                        None
                     )
-
                 b = tm.active_batch
-                total_cnt = len(b.tasks)
-                succ_cnt = sum(1 for t in b.tasks if t.status == "success")
-                fail_cnt = sum(1 for t in b.tasks if t.status == "failed")
-                canc_cnt = sum(1 for t in b.tasks if t.status == "cancelled")
-                proc_cnt = sum(1 for t in b.tasks if t.status == "processing")
+                snapshot = {
+                    "batch_id": b.batch_id,
+                    "status": b.status,
+                    "output_dir": b.output_dir,
+                    "zip_path": b.zip_path,
+                    "tasks": [(t.status, t.filename, t.mono_output, t.dual_output) for t in b.tasks],
+                }
+                hist_ids = [r["batch_id"] for r in tm.history_records]
 
-                status_color = "#DA7756" if b.status == "running" else ("#2E7D32" if b.status == "completed" else "#C62828")
-                summary_html = f"""
-                <div style='background: #FFF; border: 1px solid #E5E4DE; border-radius: 8px; padding: 10px; margin-bottom: 8px;'>
-                    <b>批次编号:</b> {b.batch_id} | <span style='color: {status_color}; font-weight: bold;'>{b.status.upper()}</span><br/>
-                    <b>进度概览:</b> 共 {total_cnt} 篇 (完成 <span style='color:#2E7D32;'>{succ_cnt}</span> / 处理中 {proc_cnt} / 失败 <span style='color:#C62828;'>{fail_cnt}</span> / 取消 {canc_cnt})<br/>
-                    <b>输出路径:</b> <small>{b.output_dir}</small>
-                </div>
-                """
+            log_txt = "".join(logs_tail) if logs_tail else "等待任务启动...\n"
 
-                # 提取所有可预览的成果项：(展示名, 真实路径) 二元组，
-                # 下拉的 value 即真实路径，消费端按路径精确匹配
-                choices = []
-                for t in b.tasks:
-                    if t.mono_output and Path(t.mono_output).exists():
-                        choices.append((f"📄 {t.filename} [仅译文 mono]", t.mono_output))
-                    if t.dual_output and Path(t.dual_output).exists():
-                        choices.append((f"📄 {t.filename} [双语对照 dual]", t.dual_output))
+            statuses = [t[0] for t in snapshot["tasks"]]
+            total_cnt = len(statuses)
+            succ_cnt = statuses.count("success")
+            fail_cnt = statuses.count("failed")
+            canc_cnt = statuses.count("cancelled")
+            proc_cnt = statuses.count("processing")
 
-                choice_values = [v for _, v in choices]
-                new_choice = current_choice if current_choice in choice_values else (choice_values[0] if choice_values else "")
-                has_results = len(choices) > 0
-                has_failures = (fail_cnt + canc_cnt) > 0 and b.status != "running"
+            status_color = "#DA7756" if snapshot["status"] == "running" else ("#2E7D32" if snapshot["status"] == "completed" else "#C62828")
+            summary_html = f"""
+            <div style='background: #FFF; border: 1px solid #E5E4DE; border-radius: 8px; padding: 10px; margin-bottom: 8px;'>
+                <b>批次编号:</b> {snapshot['batch_id']} | <span style='color: {status_color}; font-weight: bold;'>{snapshot['status'].upper()}</span><br/>
+                <b>进度概览:</b> 共 {total_cnt} 篇 (完成 <span style='color:#2E7D32;'>{succ_cnt}</span> / 处理中 {proc_cnt} / 失败 <span style='color:#C62828;'>{fail_cnt}</span> / 取消 {canc_cnt})<br/>
+                <b>输出路径:</b> <small>{snapshot['output_dir']}</small>
+            </div>
+            """
 
-                zip_comp_val = b.zip_path if b.zip_path and Path(b.zip_path).exists() else None
-                hist_choices = [r["batch_id"] for r in tm.history_records]
+            # 提取所有可预览的成果项：(展示名, 真实路径) 二元组，
+            # 下拉的 value 即真实路径，消费端按路径精确匹配
+            choices = []
+            for _, fname, mono_p, dual_p in snapshot["tasks"]:
+                if mono_p and Path(mono_p).exists():
+                    choices.append((f"📄 {fname} [仅译文 mono]", mono_p))
+                if dual_p and Path(dual_p).exists():
+                    choices.append((f"📄 {fname} [双语对照 dual]", dual_p))
 
-                return (
-                    log_txt,
-                    summary_html,
-                    gr.update(choices=choices, value=new_choice, visible=has_results),
-                    gr.update(visible=has_failures),
-                    gr.update(visible=has_results or bool(zip_comp_val)),
-                    zip_comp_val,
-                    gr.update(choices=hist_choices)
-                )
+            choice_values = [v for _, v in choices]
+            new_choice = current_choice if current_choice in choice_values else (choice_values[0] if choice_values else "")
+            has_results = len(choices) > 0
+            has_failures = (fail_cnt + canc_cnt) > 0 and snapshot["status"] != "running"
+
+            zp = snapshot["zip_path"]
+            zip_ok = bool(zp and Path(zp).exists())
+            if zip_ok:
+                zip_out = zp if zp != prev_zip else gr.update()
+                new_zip_state = zp
+            else:
+                zip_out = gr.update(value=None) if prev_zip else gr.update()
+                new_zip_state = None
+
+            return (
+                log_txt,
+                summary_html,
+                gr.update(choices=choices, value=new_choice, visible=has_results),
+                gr.update(visible=has_failures),
+                gr.update(visible=has_results or zip_ok),
+                zip_out,
+                gr.update(choices=hist_ids),
+                new_zip_state
+            )
 
         timer.tick(
             fn=on_timer_tick,
-            inputs=[pdf_result_selector],
+            inputs=[pdf_result_selector, last_zip_state],
             outputs=[
                 log_output,
                 batch_summary_md,
@@ -791,7 +815,8 @@ def create_ui():
                 retry_failed_btn,
                 download_row,
                 batch_zip_file,
-                history_dropdown
+                history_dropdown,
+                last_zip_state
             ]
         )
 

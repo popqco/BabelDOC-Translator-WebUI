@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import threading
 from pathlib import Path
 
 
@@ -102,30 +103,37 @@ DEFAULT_CONFIG = {
 }
 
 
-def load_app_config() -> dict:
-    cfg = DEFAULT_CONFIG.copy()
-    if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    cfg.update(data)
-        except Exception as e:
-            print(f"Error loading config: {e}")
+# 配置读写的进程内互斥锁：save 是"读-改-写"，不加锁时并发保存会互相覆盖丢失更新。
+# 可重入：save_app_config 内部会复用 load_app_config
+_CONFIG_LOCK = threading.RLock()
 
-    cfg["output_dir"] = _sanitize_output_dir(cfg.get("output_dir"))
-    return cfg
+
+def load_app_config() -> dict:
+    with _CONFIG_LOCK:
+        cfg = DEFAULT_CONFIG.copy()
+        if CONFIG_FILE.exists():
+            try:
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        cfg.update(data)
+            except Exception as e:
+                print(f"Error loading config: {e}")
+
+        cfg["output_dir"] = _sanitize_output_dir(cfg.get("output_dir"))
+        return cfg
 
 
 def save_app_config(cfg: dict):
-    try:
-        current = load_app_config()
-        current.update(cfg)
-        current["output_dir"] = _sanitize_output_dir(current.get("output_dir"))
-        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp_file = CONFIG_FILE.with_suffix(".tmp")
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            json.dump(current, f, ensure_ascii=False, indent=2)
-        tmp_file.replace(CONFIG_FILE)
-    except Exception as e:
-        print(f"Error saving config: {e}")
+    with _CONFIG_LOCK:
+        try:
+            current = load_app_config()
+            current.update(cfg)
+            current["output_dir"] = _sanitize_output_dir(current.get("output_dir"))
+            CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp_file = CONFIG_FILE.with_suffix(".tmp")
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(current, f, ensure_ascii=False, indent=2)
+            tmp_file.replace(CONFIG_FILE)
+        except Exception as e:
+            print(f"Error saving config: {e}")

@@ -6,13 +6,14 @@ import shutil
 import hashlib
 import threading
 import subprocess
+import collections
 from datetime import datetime, timedelta
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Callable
 
 from core.config import get_base_dir, load_app_config
-from core.translator_adapter import TranslatorAdapter, ensure_offline_assets
+from core.translator_adapter import TranslatorAdapter, ensure_offline_assets, get_kernel32
 
 BASE_DIR = get_base_dir()
 
@@ -33,7 +34,7 @@ class WindowsJobManager:
         try:
             import ctypes
             from ctypes import wintypes
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32 = get_kernel32()
 
             class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
                 _fields_ = [
@@ -90,11 +91,13 @@ class WindowsJobManager:
             return
         try:
             import ctypes
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32 = get_kernel32()
             h_proc = kernel32.OpenProcess(0x1F0FFF, False, pid)
             if h_proc:
                 kernel32.AssignProcessToJobObject(self.job, h_proc)
                 kernel32.CloseHandle(h_proc)
+            else:
+                print(f"[WARN] OpenProcess({pid}) 失败（错误码 {ctypes.get_last_error()}），进程树不受 Job Object 保护")
         except Exception as e:
             print(f"[WARN] Assign process to Job Object failed: {e}")
 
@@ -102,8 +105,7 @@ class WindowsJobManager:
         if not self.job:
             return
         try:
-            import ctypes
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32 = get_kernel32()
             kernel32.TerminateJobObject(self.job, 1)
             kernel32.CloseHandle(self.job)
         except Exception:
@@ -141,11 +143,13 @@ class BatchRecord:
 
 class TaskManager:
     _instance = None
+    _instance_lock = threading.Lock()
 
     def __new__(cls, *args, **kwargs):
-        if not cls._instance:
-            cls._instance = super(TaskManager, cls).__new__(cls)
-            cls._instance._initialized = False
+        with cls._instance_lock:
+            if not cls._instance:
+                cls._instance = super(TaskManager, cls).__new__(cls)
+                cls._instance._initialized = False
         return cls._instance
 
     def __init__(self):
@@ -173,8 +177,8 @@ class TaskManager:
         # 下一个批次的预备待翻译队列
         self.pending_queue: list[dict] = []  # [{"path": str, "name": str, "hash": str}]
 
-        # 增量日志缓冲区
-        self.logs: list[str] = []
+        # 增量日志缓冲区：限制容量，避免超长批次下内存无上限增长
+        self.logs = collections.deque(maxlen=5000)
         self.history_records: list[dict] = self._load_history()
 
         # 启动后执行一次 7 天输入缓存自动清理
