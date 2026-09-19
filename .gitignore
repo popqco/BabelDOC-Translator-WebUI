@@ -28,3 +28,7 @@ video_frames/
 
 # --- Local tooling state ---
 .zcode/
+
+# --- Runtime logs ---
+*.log
+.zcodeignore

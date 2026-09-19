@@ -7,15 +7,15 @@
 ; 固定 AppId：升级/卸载识别的唯一标识，重命名应用也不会导致安装身份漂移
 AppId={{7C1E5D8B-9A42-4F6E-B3D1-A26C8F0E5B94}}
 AppName=BabelDOC 科技文档翻译器
-AppVersion=1.0.0
-VersionInfoVersion=1.0.0
+AppVersion=1.1.0
+VersionInfoVersion=1.1.0
 VersionInfoCompany=popqco
 VersionInfoDescription=BabelDOC 科技文档/芯片规格书批量双语翻译器 (桌面版)
 AppPublisher=popqco
 DefaultDirName={autopf}\BabelDOC-Translator
 DefaultGroupName=BabelDOC
 OutputDir=dist
-OutputBaseFilename=BabelDOC_Translator_Setup_v1.0
+OutputBaseFilename=BabelDOC_Translator_Setup_v1.1
 Compression=lzma2/ultra64
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64

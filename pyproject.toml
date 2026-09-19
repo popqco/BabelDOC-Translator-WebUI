@@ -1,6 +1,6 @@
 [project]
 name = "babeldoc-hardware-translator"
-version = "1.0.0"
+version = "1.1.0"
 description = "BabelDOC 科技文档/芯片规格书批量双语翻译器（Gradio + pywebview 桌面应用）"
 readme = "README.md"
 license = { file = "LICENSE" }
